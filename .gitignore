@@ -1,0 +1,24 @@
+# EDK2 build output
+Build/
+/Build*/
+*.efi
+*.dll
+*.obj
+*.o
+*.lib
+*.pdb
+*.map
+*.debug
+*.depex
+
+# Collected hardware info (device-specific dumps, may be large)
+allyx-hwinfo/
+allyx-hwinfo.tgz
+*.dat
+*.dsl
+*.aml
+
+# Editor / OS cruft
+.vscode/
+*.swp
+.DS_Store

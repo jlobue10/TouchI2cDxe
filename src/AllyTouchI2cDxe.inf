@@ -1,0 +1,42 @@
+## @file
+#  AllyTouchI2cDxe -- produces EFI_ABSOLUTE_POINTER_PROTOCOL for the ROG Xbox
+#  Ally X Goodix GT7868Q I2C-HID touchscreen, for use by rEFInd.
+#
+#  SKELETON: the transport/report constants are filled in from the hardware
+#  facts collected by tools/collect-hardware-info.sh and confirmed by
+#  tools/probe/AllyTouchProbe.efi. Not yet functional.
+#
+#  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010006
+  BASE_NAME                      = AllyTouchI2cDxe
+  FILE_GUID                      = 2b8e6b44-9d2f-4e71-8c05-4a3f6e2d1b90
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = AllyTouchI2cDxeEntry
+
+[Sources]
+  AllyTouchI2cDxe.c
+  DwI2c.h
+  I2cHid.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  BaseLib
+  BaseMemoryLib
+  IoLib
+  DebugLib
+
+[Protocols]
+  gEfiAbsolutePointerProtocolGuid            ## PRODUCES
+
+[Depex]
+  TRUE
