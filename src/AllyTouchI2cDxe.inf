@@ -1,10 +1,9 @@
 ## @file
 #  AllyTouchI2cDxe -- produces EFI_ABSOLUTE_POINTER_PROTOCOL for the ROG Xbox
-#  Ally X Goodix GT7868Q I2C-HID touchscreen, for use by rEFInd.
+#  Ally X Novatek NVTK0603 I2C-HID touchscreen, for use by rEFInd.
 #
-#  SKELETON: the transport/report constants are filled in from the hardware
-#  facts collected by tools/collect-hardware-info.sh and confirmed by
-#  tools/probe/AllyTouchProbe.efi. Not yet functional.
+#  Hardware constants confirmed from the Ally X DSDT (see DESIGN.md); assumes
+#  firmware leaves the controller + panel powered and initialized (scenario a).
 #
 #  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
 #  SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -32,6 +31,7 @@
   UefiLib
   BaseLib
   BaseMemoryLib
+  MemoryAllocationLib
   IoLib
   DebugLib
 

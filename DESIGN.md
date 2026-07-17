@@ -1,11 +1,17 @@
 # AllyTouchI2cDxe — design & feasibility
 
 A UEFI driver that produces `EFI_ABSOLUTE_POINTER_PROTOCOL` for the **ASUS ROG
-Xbox Ally X** built-in touchscreen (**Goodix GT7868Q**, an I2C-HID device), so
-the rEFInd boot manager can be driven by touch. Intended to install into rEFInd's
-`drivers_x64/` next to `UsbXbox360Dxe.efi`.
+Xbox Ally X** built-in touchscreen (**Novatek `NVTK0603`**, an I2C-HID device),
+so the rEFInd boot manager can be driven by touch. Intended to install into
+rEFInd's `drivers_x64/` next to `UsbXbox360Dxe.efi`.
 
 This document captures the feasibility spike that preceded any code.
+
+> **Correction (2026-07-17):** the spike assumed a Goodix GT7868Q (carried over
+> from the 2023 ROG Ally). The DSDT collected from actual RC73XA hardware shows
+> a **Novatek NVTK0603** instead — see the confirmed facts below. The
+> architecture is unchanged (it is still a standard HID-over-I2C device on an
+> AMD DesignWare controller); only the Goodix-specific constants died.
 
 ---
 
@@ -104,15 +110,27 @@ no bring-up, we're in (a).
 
 ---
 
-## Open hardware facts to collect (see `tools/collect-hardware-info.sh`)
+## Confirmed hardware facts (2026-07-17, from the RC73XA DSDT)
 
-The driver is parameterized by values that come from the Ally X's own ACPI:
+Collected by `tools/collect-hardware-info.sh` (dump in `tools/allyx-hwinfo/`,
+disassembly `acpi_disasm/DSDT.dsl`):
 
-- which `AMDI0010:xx` instance the panel is on, and its MMIO base;
-- the touchscreen ACPI `_HID` (e.g. `GDIX####`) and I2C **slave address**
-  (`0x14` or `0x5D`);
-- `wHIDDescRegister` (HID descriptor register address);
-- reset / interrupt GPIOs (from `_CRS`/`_DSD`), needed only in scenario (b).
+| Fact | Value |
+|---|---|
+| Touchscreen ACPI device | `\_SB.I2CA.TPL0`, `_HID` **`NVTK0603`**, `_CID` `PNP0C50` |
+| HID identity | vendor **0x0603** (Novatek) / product 0xF200 |
+| Controller instance | `\_SB.I2CA` = `AMDI0010:00` (`_UID` 0) = Linux `i2c-0` |
+| Controller MMIO base | **`0xFEDC2000`**, 4 KiB (`Memory32Fixed` in `_CRS`) |
+| I2C slave address | **`0x01`** (7-bit; `SADR[0]` patched into `I2cSerialBusV2`) |
+| Bus speed | 400 kHz (`0x61A80`) |
+| `wHIDDescRegister` | **`0x0000`** (`_DSM` HID-I2C UUID, function 1) |
+| Reset GPIO | **none** (no `GpioIo` in `_CRS`, no `_DSD`) — no sequencing needed |
+| Interrupt | `GpioInt` pin 9 on `\_SB.GPIO` (unused; the driver polls) |
+
+The `_HID`/address/descriptor-register come from packages indexed by a
+firmware-set byte (`TPLI`, ASUS multi-source panel support); each package has
+one entry, so index 0 — confirmed by Linux successfully enumerating the panel
+through this exact path (`i2c_hid_acpi` + `hid-multitouch`).
 
 ---
 

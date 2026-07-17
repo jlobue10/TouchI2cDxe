@@ -2,13 +2,14 @@
   HID-over-I2C (HIDI2C) protocol structures and command opcodes.
 
   These are defined by the Microsoft "HID over I2C Protocol Specification" v1.0
-  and are device-independent. The GT7868Q on the ROG Xbox Ally X is a standard
-  HIDI2C device (driven by the generic i2c-hid / hid-multitouch stack on Linux),
-  so it exposes the descriptor and register model below at its I2C slave address.
+  and are device-independent. The Novatek NVTK0603 on the ROG Xbox Ally X is a
+  standard HIDI2C device (driven by the generic i2c-hid / hid-multitouch stack
+  on Linux), so it exposes the descriptor and register model below at its I2C
+  slave address.
 
   The only device-specific value is wHIDDescRegister -- the register address at
-  which the HID descriptor lives. It is published by ACPI (the device's _DSD /
-  the i2c-hid ACPI binding) and must be filled in from the collected DSDT.
+  which the HID descriptor lives. On the Ally X it is 0x0000, from the DSDT's
+  _DSM (HID-I2C UUID, function 1) on \_SB.I2CA.TPL0.
 
   Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -20,11 +21,10 @@
 #include <Uefi.h>
 
 //
-// The HID descriptor register address (wHIDDescRegister). Typical values are
-// 0x0001 or 0x0020; the true value comes from ACPI on the Ally X.
-// TODO(hardware): replace with the value read from the collected DSDT.
+// The HID descriptor register address (wHIDDescRegister). Confirmed 0x0000 on
+// the Ally X from ACPI (\_SB.I2CA.TPL0 _DSM function 1 returns HIDA[0]=0x00).
 //
-#define I2C_HID_DESC_REGISTER_DEFAULT  0x0001
+#define I2C_HID_DESC_REGISTER_DEFAULT  0x0000
 
 //
 // HID-over-I2C descriptor (returned when reading from wHIDDescRegister).
@@ -43,7 +43,7 @@ typedef struct {
   UINT16  wMaxOutputLength;
   UINT16  wCommandRegister;    // write commands (below) here
   UINT16  wDataRegister;
-  UINT16  wVendorID;           // 0x27C6 for Goodix
+  UINT16  wVendorID;           // 0x0603 for Novatek
   UINT16  wProductID;
   UINT16  wVersionID;
   UINT32  Reserved;

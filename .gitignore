@@ -1,6 +1,8 @@
 # EDK2 build output
 Build/
 /Build*/
+build_test/
+output/
 *.efi
 *.dll
 *.obj

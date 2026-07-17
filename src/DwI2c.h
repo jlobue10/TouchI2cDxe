@@ -114,10 +114,11 @@
 #define DW_IC_ABRT_7B_ADDR_NOACK  BIT0
 
 //
-// Goodix GT7868Q candidate 7-bit I2C slave addresses (Goodix uses one of these;
-// confirmed per-device from ACPI _CRS I2cSerialBus SlaveAddress).
+// Novatek NVTK0603 touchscreen 7-bit I2C slave address, confirmed from the
+// Ally X (RC73XA) DSDT: \_SB.I2CA.TPL0 _CRS I2cSerialBusV2 with SADR[0]=0x01
+// patched into the SlaveAddress field. (0x01 is in the I2C reserved range but
+// is what the hardware really uses -- Linux i2c-hid drives it there.)
 //
-#define GOODIX_I2C_ADDR_A   0x14
-#define GOODIX_I2C_ADDR_B   0x5D
+#define NVTK_I2C_ADDR       0x01
 
 #endif // _DW_I2C_H_
