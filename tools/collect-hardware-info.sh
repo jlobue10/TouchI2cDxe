@@ -63,6 +63,9 @@ for d in /sys/bus/acpi/devices/AMDI0010:*; do
   echo "   path: $(cat "$d/path" 2>/dev/null)"
   cat "$d/resources" 2>/dev/null | sed 's/^/   /'
 done | tee "$OUT/10-amdi0010.txt"
+
+say "AMDI0010 MMIO ranges (/proc/iomem, addresses need root)"
+grep -i -A1 'AMDI0010' /proc/iomem | tee "$OUT/11-iomem.txt"
 echo "grep the disassembled DSDT for the Memory() base in each AMDI0010 _CRS." >> "$OUT/10-amdi0010.txt"
 
 # ---- I2C buses + the touchscreen device -------------------------------------
@@ -83,7 +86,7 @@ say "HID devices (looking for Goodix vendor 27C6 / i2c-hid)"
     [ -e "$c" ] || continue
     nm=$(cat "$c/name" 2>/dev/null)
     case "$nm" in
-      *i2c-*|*hid*|*GDIX*|*GXTP*|*oodix*)
+      *i2c-*|*hid*|*GDIX*|*GXTP*|*oodix*|*NVTK*|*ovatek*)
         echo "-- $c name='$nm'"
         echo "   modalias: $(cat "$c/modalias" 2>/dev/null)"
         echo "   firmware_node: $(readlink -f "$c/firmware_node" 2>/dev/null)"
@@ -93,12 +96,13 @@ say "HID devices (looking for Goodix vendor 27C6 / i2c-hid)"
   done
 } | tee "$OUT/30-hid.txt"
 
-say "ACPI touchscreen candidates (GDIX / GXTP / Goodix)"
+say "ACPI touchscreen candidates (Goodix / Novatek / any PNP0C50 i2c-hid)"
 for d in /sys/bus/acpi/devices/*; do
   [ -e "$d" ] || continue
   hid=$(cat "$d/hid" 2>/dev/null)
-  case "$hid" in
-    GDIX*|GXTP*|GOOD*|PNP0C50|*0C50)
+  mod=$(cat "$d/modalias" 2>/dev/null)
+  case "$hid:$mod" in
+    GDIX*|GXTP*|GOOD*|NVTK*|*0C50*)
       echo "-- $(basename "$d")  hid=$hid"
       echo "   path: $(cat "$d/path" 2>/dev/null)"
       cat "$d/resources" 2>/dev/null | sed 's/^/   /'
@@ -112,7 +116,7 @@ say "USB devices (touchscreen should NOT appear here)"
 
 say "kernel log trail"
 ( dmesg 2>/dev/null || sudo dmesg 2>/dev/null ) | \
-  grep -iE 'i2c_designware|i2c-designware|i2c_hid|i2c-hid|hid-multitouch|hid_multitouch|goodix|GDIX|GXTP|AMDI0010|27c6' | \
+  grep -iE 'i2c_designware|i2c-designware|i2c_hid|i2c-hid|hid-multitouch|hid_multitouch|goodix|GDIX|GXTP|NVTK|novatek|AMDI0010|27c6' | \
   tee "$OUT/50-dmesg.txt"
 
 # ---- summary ----------------------------------------------------------------
