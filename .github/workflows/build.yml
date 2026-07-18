@@ -1,5 +1,11 @@
 name: Build UEFI Driver
 
+# The release step publishes with the default GITHUB_TOKEN, which is
+# read-only unless the workflow requests write access (release creation
+# 403s otherwise).
+permissions:
+  contents: write
+
 on:
   push:
     branches: [ main, dev ]
