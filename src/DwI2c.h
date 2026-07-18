@@ -120,4 +120,41 @@
 #define GOODIX_I2C_ADDR_A   0x14
 #define GOODIX_I2C_ADDR_B   0x5D
 
+//
+// Layer-1 API (DwI2c.c): polled master-mode init and combined transfer.
+//
+
+/** TRUE if IC_COMP_TYPE at this base reads back the DesignWare magic. **/
+BOOLEAN
+DwI2cControllerPresent (
+  IN UINT32  Base
+  );
+
+/** Disable the controller (best effort, bounded wait). **/
+VOID
+DwI2cDisable (
+  IN UINT32  Base
+  );
+
+/** Program 100 kHz polled master mode targeting SlaveAddr and enable. **/
+EFI_STATUS
+DwI2cInit (
+  IN UINT32  Base,
+  IN UINT8   SlaveAddr
+  );
+
+/**
+  Write WLen bytes, then (if RLen > 0) repeated-START read RLen bytes, ending
+  with STOP. WLen == 0 issues a pure read. Returns EFI_NO_RESPONSE on address
+  NAK, EFI_DEVICE_ERROR on other aborts, EFI_TIMEOUT on stuck bus.
+**/
+EFI_STATUS
+DwI2cXfer (
+  IN  UINT32       Base,
+  IN  CONST UINT8  *WBuf,   OPTIONAL
+  IN  UINTN        WLen,
+  OUT UINT8        *RBuf,   OPTIONAL
+  IN  UINTN        RLen
+  );
+
 #endif // _DW_I2C_H_

@@ -21,8 +21,8 @@
 
 //
 // The HID descriptor register address (wHIDDescRegister). Typical values are
-// 0x0001 or 0x0020; the true value comes from ACPI on the Ally X.
-// TODO(hardware): replace with the value read from the collected DSDT.
+// 0x0001 or 0x0020; ACPI publishes the true value, but the driver and probe
+// simply try both candidates at detection time.
 //
 #define I2C_HID_DESC_REGISTER_DEFAULT  0x0001
 
@@ -77,5 +77,55 @@ typedef struct {
 #define I2C_HID_REPORT_TYPE_INPUT     0x01
 #define I2C_HID_REPORT_TYPE_OUTPUT    0x02
 #define I2C_HID_REPORT_TYPE_FEATURE   0x03
+
+//
+// Layer-2 API (I2cHid.c). All calls assume DwI2cInit already targeted the
+// device's slave address on this controller.
+//
+
+EFI_STATUS
+I2cHidReadRegister (
+  IN  UINT32  Base,
+  IN  UINT16  Reg,
+  OUT UINT8   *Buf,
+  IN  UINTN   Len
+  );
+
+/** Plain read (no register address) -- how input reports are retrieved. **/
+EFI_STATUS
+I2cHidRawRead (
+  IN  UINT32  Base,
+  OUT UINT8   *Buf,
+  IN  UINTN   Len
+  );
+
+EFI_STATUS
+I2cHidCommand (
+  IN UINT32  Base,
+  IN UINT16  CmdReg,
+  IN UINT8   Arg,
+  IN UINT8   Opcode
+  );
+
+EFI_STATUS
+I2cHidSetPower (
+  IN UINT32  Base,
+  IN UINT16  CmdReg,
+  IN UINT8   PowerState
+  );
+
+EFI_STATUS
+I2cHidReset (
+  IN UINT32  Base,
+  IN UINT16  CmdReg
+  );
+
+/** Read + validate the 30-byte HID descriptor at DescReg. **/
+EFI_STATUS
+I2cHidReadDescriptor (
+  IN  UINT32              Base,
+  IN  UINT16              DescReg,
+  OUT I2C_HID_DESCRIPTOR  *Desc
+  );
 
 #endif // _I2C_HID_H_

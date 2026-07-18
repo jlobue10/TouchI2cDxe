@@ -119,11 +119,13 @@ The driver is parameterized by values that come from the Ally X's own ACPI:
 ## Milestones
 
 1. **Probe** (`AllyTouchProbe.efi`) — resolve scenario (a)/(b). Doubles as
-   Layer 1 + a Layer-2 register read. *(scaffolded)*
-2. **Reader** — SET_POWER(on) + input-report poll; dump touch coordinates to the
-   console.
+   Layer 1 + a Layer-2 register read. *(implemented)*
+2. **Reader** — SET_POWER(on) + input-report poll. *(implemented, folded into
+   the driver; the driver auto-detects base/address/descreg at load, so the
+   probe is now only needed if detection fails)*
 3. **AbsolutePointer** — install `EFI_ABSOLUTE_POINTER_PROTOCOL`; verify rEFInd
-   moves its pointer / selects icons by touch.
+   moves its pointer / selects icons by touch. *(implemented; awaiting
+   on-hardware validation)*
 4. **Package** — release `.efi`; add its download to rEFInd_GUI's driver-install
    step (alongside `UsbXbox360Dxe.efi`), Ally-X-gated.
 

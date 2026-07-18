@@ -1,0 +1,88 @@
+name: Build UEFI Driver
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        apt-get update
+        apt-get install -y build-essential uuid-dev iasl git nasm python3
+
+    - name: Clone EDK2
+      run: |
+        git clone --depth 1 --branch edk2-stable202411 https://github.com/tianocore/edk2.git
+        cd edk2
+        git submodule update --init --depth 1
+
+    - name: Setup EDK2 environment
+      run: |
+        cd edk2
+        export WORKSPACE=$PWD
+        export PACKAGES_PATH=$WORKSPACE
+        ln -sf /usr/bin/python3 /usr/bin/python
+        make -C BaseTools -j$(nproc)
+        source edksetup.sh
+
+    - name: Copy sources to EDK2
+      run: |
+        # Keep the repo layout (src/ + tools/probe/) so the probe's relative
+        # includes of ../../src/*.h resolve.
+        mkdir -p edk2/MdeModulePkg/AllyTouchI2cDxe
+        cp -r src tools edk2/MdeModulePkg/AllyTouchI2cDxe/
+
+    - name: Add modules to build configuration
+      run: |
+        cd edk2
+        sed -i '/\[Components\]/a \  MdeModulePkg/AllyTouchI2cDxe/src/AllyTouchI2cDxe.inf\n  MdeModulePkg/AllyTouchI2cDxe/tools/probe/AllyTouchProbe.inf' MdeModulePkg/MdeModulePkg.dsc
+
+    - name: Build driver and probe
+      run: |
+        cd edk2
+        export WORKSPACE=$PWD
+        export PACKAGES_PATH=$WORKSPACE
+        source edksetup.sh
+        build -a X64 -t GCC5 -b RELEASE -p MdeModulePkg/MdeModulePkg.dsc -m MdeModulePkg/AllyTouchI2cDxe/src/AllyTouchI2cDxe.inf
+        build -a X64 -t GCC5 -b RELEASE -p MdeModulePkg/MdeModulePkg.dsc -m MdeModulePkg/AllyTouchI2cDxe/tools/probe/AllyTouchProbe.inf
+
+    - name: Prepare artifact
+      run: |
+        mkdir -p output
+        cp edk2/Build/MdeModule/RELEASE_GCC5/X64/AllyTouchI2cDxe.efi output/
+        cp edk2/Build/MdeModule/RELEASE_GCC5/X64/AllyTouchProbe.efi output/
+        cp README.md output/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AllyTouchI2cDxe-${{ github.sha }}
+        path: output/*
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          output/AllyTouchI2cDxe.efi
+          output/AllyTouchProbe.efi
+          output/README.md
+        generate_release_notes: true
+        draft: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

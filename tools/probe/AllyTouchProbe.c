@@ -40,6 +40,8 @@ STATIC CONST UINT32  mCandidateBases[] = {
 
 STATIC CONST UINT8   mCandidateAddrs[] = { GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B };
 
+STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0001, 0x0020 };
+
 #define POLL_LIMIT  100000   // ~ arbitrary bounded spins for polled status
 
 STATIC
@@ -216,33 +218,38 @@ UefiMain (
     AnyController = TRUE;
 
     for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
-      UINT8       Addr = mCandidateAddrs[a];
-      UINT8       Reg2[2];
-      UINT8       Desc[30];
-      EFI_STATUS  Status;
+      UINTN  r;
 
-      Reg2[0] = (UINT8)(I2C_HID_DESC_REGISTER_DEFAULT & 0xFF);
-      Reg2[1] = (UINT8)((I2C_HID_DESC_REGISTER_DEFAULT >> 8) & 0xFF);
+      for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
+        UINT8       Addr    = mCandidateAddrs[a];
+        UINT16      DescReg = mCandidateDescRegs[r];
+        UINT8       Reg2[2];
+        UINT8       Desc[30];
+        EFI_STATUS  Status;
 
-      MasterInit (Base, Addr);
-      Status = XferReadReg (Base, Reg2, sizeof (Reg2), Desc, sizeof (Desc));
-      RegWr (Base, DW_IC_ENABLE, 0);
+        Reg2[0] = (UINT8)(DescReg & 0xFF);
+        Reg2[1] = (UINT8)((DescReg >> 8) & 0xFF);
 
-      Print (L"    addr 0x%02x: ", Addr);
-      if (Status == EFI_SUCCESS) {
-        UINT16 VendorId = (UINT16)(Desc[20] | (Desc[21] << 8));
-        Print (L"ACK. HID desc:");
-        for (i = 0; i < sizeof (Desc); i++) {
-          Print (L" %02x", Desc[i]);
+        MasterInit (Base, Addr);
+        Status = XferReadReg (Base, Reg2, sizeof (Reg2), Desc, sizeof (Desc));
+        RegWr (Base, DW_IC_ENABLE, 0);
+
+        Print (L"    addr 0x%02x descreg 0x%04x: ", Addr, DescReg);
+        if (Status == EFI_SUCCESS) {
+          UINT16 VendorId = (UINT16)(Desc[20] | (Desc[21] << 8));
+          Print (L"ACK. HID desc:");
+          for (i = 0; i < sizeof (Desc); i++) {
+            Print (L" %02x", Desc[i]);
+          }
+          Print (L"\n              wHIDDescLength=%u wVendorID=0x%04x %s\n",
+                 (UINT16)(Desc[0] | (Desc[1] << 8)), VendorId,
+                 (VendorId == 0x27C6) ? L"(Goodix!)" : L"");
+          AnyPanel = TRUE;
+        } else if (Status == EFI_NO_RESPONSE) {
+          Print (L"no ACK (nothing at this address)\n");
+        } else {
+          Print (L"error %r\n", Status);
         }
-        Print (L"\n              wHIDDescLength=%u wVendorID=0x%04x %s\n",
-               (UINT16)(Desc[0] | (Desc[1] << 8)), VendorId,
-               (VendorId == 0x27C6) ? L"(Goodix!)" : L"");
-        AnyPanel = TRUE;
-      } else if (Status == EFI_NO_RESPONSE) {
-        Print (L"no ACK (nothing at this address)\n");
-      } else {
-        Print (L"error %r\n", Status);
       }
     }
   }

@@ -48,18 +48,17 @@ ACK?" test is a small app (`tools/probe/AllyTouchProbe.c/.inf`). It:
 
 ### Build it
 
-Use the **same EDK2 workspace/toolchain you already use for `UsbXbox360Dxe`**.
-Either add the INF to your platform DSC `[Components]`, or point `build` at it:
+Easiest: take `AllyTouchProbe.efi` from the repo's CI artifacts (every push
+builds it), or run `./test_build.sh` (Linux / WSL) at the repo root — it clones
+EDK2, builds the driver **and** the probe, and drops both into `output/`.
+
+Manual EDK2 build (same workspace/toolchain as `UsbXbox360Dxe`):
 
 ```
 # from your EDK2 workspace root, with AllyTouchI2cDxe checked out inside it
 build -a X64 -t GCC5 -p MdeModulePkg/MdeModulePkg.dsc \
       -m AllyTouchI2cDxe/tools/probe/AllyTouchProbe.inf
 ```
-
-(Any package DSC that provides `UefiApplicationEntryPoint`, `UefiLib`, `IoLib`
-works; `MdeModulePkg.dsc` or `ShellPkg.dsc` are convenient. The app only needs
-MdePkg library classes.)
 
 The output `AllyTouchProbe.efi` lands under
 `Build/<Pkg>/<TARGET>_<TOOLCHAIN>/X64/AllyTouchProbe.efi`.

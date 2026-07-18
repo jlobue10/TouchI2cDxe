@@ -1,6 +1,6 @@
 # AllyTouchI2cDxe
 
-**Status: experimental / work in progress — not yet functional.**
+**Status: implemented, not yet validated on hardware.**
 
 A UEFI driver that aims to make the **ASUS ROG Xbox Ally X** built-in touchscreen
 (**Goodix GT7868Q**, an I2C-HID device) usable in the [rEFInd](https://www.rodsbooks.com/refind/)
@@ -21,46 +21,59 @@ feasibility spike are in **[DESIGN.md](DESIGN.md)**.
 
 ## Current state
 
-Feasibility looks favorable (no per-boot firmware upload; the panel is a standard
-HID-over-I2C device; ~500–800 LOC on the happy path). The project rides on **one
-on-hardware go/no-go check** — whether the firmware leaves the I2C controller +
-panel live at the boot-loader stage, or whether we must power them up.
+All three layers are implemented — DesignWare I2C master (polled), HID-over-I2C
+transport, and a minimal HID report-descriptor parser feeding
+`EFI_ABSOLUTE_POINTER_PROTOCOL`. **No hardware constants need filling in**: at
+load the driver sweeps the candidate FCH controller bases
+(`0xFEDC2000`–`0xFEDC6000`), both Goodix slave addresses (`0x14`/`0x5D`), and
+the common `wHIDDescRegister` values (`0x0001`/`0x0020`), then binds to the
+first valid HID descriptor it finds. If nothing answers it prints a diagnostic
+and unloads.
 
-### Start here
+What has **not** happened yet is a successful run on the Ally X. The open
+question is still scenario (a) vs (b) — whether firmware leaves the panel live
+at the boot-loader stage (see DESIGN.md).
 
-1. **Collect hardware facts** — run [`tools/collect-hardware-info.sh`](tools/collect-hardware-info.sh)
-   on the Ally X booted into Linux. It dumps the ACPI/I2C/GPIO parameters the
-   driver must hardcode (controller MMIO base, slave address, HID descriptor
-   register, reset/IRQ GPIOs) and prints a checklist to fill in.
-2. **Run the go/no-go probe** — see [`tools/uefi-probe.md`](tools/uefi-probe.md).
-   Phase 0 is a zero-code `mm` check in the UEFI Shell; Phase 1 builds
-   [`tools/probe/AllyTouchProbe.efi`](tools/probe/AllyTouchProbe.c) (same EDK2
-   toolchain as `UsbXbox360Dxe`) and reports whether the Goodix panel ACKs
-   without any bring-up.
+### Testing on the Ally X
 
-The probe result decides whether the driver is "just an I2C-HID reader"
-(scenario a) or needs a small reset-GPIO/`_PS0` power-on step (scenario b).
+1. **From the UEFI Shell first** (recommended): `load AllyTouchI2cDxe.efi`.
+   The detection log prints which controller/address/descriptor it found (or
+   that nothing answered). If it installs, `AllyTouchProbe.efi` and shell apps
+   aren't needed — go straight to rEFInd.
+2. **In rEFInd**: drop `AllyTouchI2cDxe.efi` into `drivers_x64/` next to
+   `UsbXbox360Dxe.efi` and reboot. Touch should move/select in the menu.
+3. **If nothing answers**: run [`tools/probe/AllyTouchProbe.efi`](tools/probe/AllyTouchProbe.c)
+   and [`tools/collect-hardware-info.sh`](tools/collect-hardware-info.sh) (Linux)
+   per [`tools/uefi-probe.md`](tools/uefi-probe.md) — that distinguishes
+   "nonstandard controller base" from "panel power-gated (scenario b)", which
+   would need a reset-GPIO/`_PS0` power-on step added to the driver.
 
 ## Layout
 
 ```
 DESIGN.md                     feasibility spike, architecture, sources
 src/
-  DwI2c.h                     DesignWare I2C register defs (standard)
-  I2cHid.h                    HID-over-I2C structs + opcodes (standard)
-  AllyTouchI2cDxe.inf/.c      driver skeleton (Layers 1-3, TODO(hardware))
+  DwI2c.c/.h                  Layer 1: DesignWare I2C master (MMIO, polled)
+  I2cHid.c/.h                 Layer 2: HID-over-I2C transport
+  HidParse.c/.h               Layer 3: report-descriptor parse (tip/X/Y)
+  AllyTouchI2cDxe.inf/.c      detection sweep, bring-up, AbsolutePointer
 tools/
-  collect-hardware-info.sh    Linux-side ACPI/I2C/GPIO dumper -> start here
+  collect-hardware-info.sh    Linux-side ACPI/I2C/GPIO dumper (fallback)
   uefi-probe.md               the go/no-go procedure
   probe/AllyTouchProbe.c/.inf standalone UEFI Shell liveness probe
+test_build.sh                 local EDK2 build (Linux / WSL)
+.github/workflows/build.yml   CI build -> .efi artifacts
 ```
 
 ## Building
 
-Uses the standard EDK2 build (same workspace/toolchain as `UsbXbox360Dxe`). The
-probe app and the driver are both EDK2 modules; point `build` at their `.inf` or
-add them to a platform DSC `[Components]`. See `tools/uefi-probe.md` for the
-probe build line.
+Same EDK2 build as `UsbXbox360Dxe`. Easiest paths:
+
+- **CI**: every push builds `AllyTouchI2cDxe.efi` + `AllyTouchProbe.efi` as
+  workflow artifacts (`.github/workflows/build.yml`); tags `v*` publish a
+  release.
+- **Locally** (Linux or WSL): `./test_build.sh` clones `edk2-stable202411`,
+  builds both modules, and drops the `.efi`s into `output/`.
 
 ## License
 
