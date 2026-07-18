@@ -78,7 +78,7 @@
 #define ALLY_I2C_SLAVE_ADDR  NVTK_I2C_ADDR       // 0x01
 #define ALLY_HID_DESC_REG    0x0000
 
-#define ALLY_DRIVER_VERSION  "v4"
+#define ALLY_DRIVER_VERSION  "v5"
 
 //
 // Poll every 10 ms (EFI timer units are 100 ns). At 400 kHz a full
@@ -783,10 +783,12 @@ AllyTouchI2cDxeEntry (
     FreePool (Handles);
   }
   AllyLog (Dev, "pre-existing AbsolutePointer handles: %d; AOAC I2C0 status "
-           "0x%02x; COMP_TYPE@%08x 0x%08x",
+           "0x%02x; COMP_TYPE@%08x 0x%08x COMP_VERSION 0x%08x",
            (UINT32)HandleCount,
            MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)),
-           ALLY_I2C_BASE, MmioRead32 ((UINTN)ALLY_I2C_BASE + DW_IC_COMP_TYPE));
+           ALLY_I2C_BASE,
+           MmioRead32 ((UINTN)ALLY_I2C_BASE + DW_IC_COMP_TYPE),
+           MmioRead32 ((UINTN)ALLY_I2C_BASE + DW_IC_COMP_VERSION));
 
   //
   // Install the protocol immediately -- rEFInd enumerates AbsolutePointer

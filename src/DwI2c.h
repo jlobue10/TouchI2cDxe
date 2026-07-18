@@ -59,7 +59,8 @@
 #define DW_IC_TX_ABRT_SOURCE   0x80
 #define DW_IC_ENABLE_STATUS    0x9C
 #define DW_IC_COMP_PARAM_1     0xF4
-#define DW_IC_COMP_TYPE        0xF8
+#define DW_IC_COMP_VERSION     0xF8
+#define DW_IC_COMP_TYPE        0xFC
 
 //
 // IC_COMP_TYPE magic identifying a DesignWare I2C block.
