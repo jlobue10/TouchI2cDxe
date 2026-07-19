@@ -4,8 +4,9 @@
   The FCH gates each of its "AMBA" peripherals (I2C, UART, ...) individually.
   On the Ally X (RC73XA) the firmware leaves the touchscreen's I2C controller
   gated during a normal boot, so its MMIO window reads back garbage until the
-  tile is powered on. The DSDT's power methods document the exact programming
-  model this header captures:
+  tile is powered on. The DSDT's power methods (identical on the Ally X and
+  the Steam Deck OLED) document the exact programming model this header
+  captures:
 
     \_SB.DSAD (Arg0 = AOAC device index, Arg1 = target D-state):
       D0:  ADTD = 0; ADPD = 1; wait until ADDS == 7
@@ -51,9 +52,15 @@
 #define FCH_AOAC_STATE_D0           0x07
 
 //
-// AOAC device index of the FCH I2C controller instance at 0xFEDC2000
-// (\_SB.I2CA, Linux i2c-0), from the DSDT's I2A0 constant.
+// AOAC device indices of the four fixed-base FCH I2C controller instances
+// (0xFEDC2000..0xFEDC5000, Linux i2c-0..3). Index 5 for I2C0 comes from the
+// Ally X DSDT's I2A0 constant; the Galileo DSDT confirms the same numbering
+// for I2C1 (\_SB.I2CB.RSET calls SRAD(0x06)) and the FCH map continues 7/8
+// for I2C2/I2C3 (coreboot aoac_defs.h across AMD SoC generations agrees).
 //
 #define FCH_AOAC_DEV_I2C0           5
+#define FCH_AOAC_DEV_I2C1           6
+#define FCH_AOAC_DEV_I2C2           7
+#define FCH_AOAC_DEV_I2C3           8
 
 #endif // _FCH_AOAC_H_

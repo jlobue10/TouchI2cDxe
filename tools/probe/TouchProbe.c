@@ -1,14 +1,15 @@
 /** @file
-  AllyTouchProbe -- a standalone UEFI Shell application that answers the single
-  go/no-go question for the AllyTouchI2cDxe project:
+  TouchProbe -- a standalone UEFI Shell application that answers the single
+  go/no-go question for the TouchI2cDxe project on a new device:
 
     "At the rEFInd / UEFI-Shell stage, is the AMD DesignWare I2C controller live,
-     and does the Goodix GT7868Q touchscreen ACK on its I2C bus WITHOUT us doing
-     any GPIO / power / clock bring-up?"
+     and does the touchscreen ACK on its I2C bus WITHOUT us doing any GPIO /
+     power / clock bring-up?"
 
   It sweeps the candidate FCH I2C controller bases, verifies each with
   IC_COMP_TYPE, then (for each live controller) tries to read the HID-over-I2C
-  descriptor from both candidate Goodix slave addresses. Results:
+  descriptor from every candidate slave address (Novatek 0x01 for the Ally X,
+  FocalTech 0x38 for the Steam Deck OLED, Goodix 0x14/0x5D). Results:
 
     * Controller present  -> IC_COMP_TYPE == 0x44570140 at base+0xF8
     * Panel ACKs + desc   -> scenario (a): firmware left it live; the driver is
@@ -40,7 +41,7 @@ STATIC CONST UINT32  mCandidateBases[] = {
 };
 
 STATIC CONST UINT8   mCandidateAddrs[] = {
-  NVTK_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
+  NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
 };
 
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
@@ -205,37 +206,46 @@ UefiMain (
   BOOLEAN     AnyController = FALSE;
   BOOLEAN     AnyPanel = FALSE;
 
-  Print (L"AllyTouchProbe -- DesignWare I2C + HID-over-I2C panel liveness check\n");
-  Print (L"====================================================================\n\n");
+  Print (L"TouchProbe -- DesignWare I2C + HID-over-I2C panel liveness check\n");
+  Print (L"================================================================\n\n");
 
   //
   // The firmware leaves the touch bus's controller tile power-gated on a
-  // normal boot; un-gate it first (what \_SB.I2CA._PS0 does) or the MMIO
-  // sweep below reads garbage at 0xFEDC2000.
+  // normal boot; un-gate it first (what the DSDT's _PS0 does) or the MMIO
+  // sweep below reads garbage. AOAC devices 5..8 are I2C0..I2C3 (Ally X
+  // touch is I2C0/dev 5; Galileo's \_SB.I2CB is I2C1/dev 6, per its DSDT
+  // I2CB.RSET -> SRAD(0x06)). Un-gate all four so the controller sweep
+  // below sees every bus.
   //
   {
-    UINT8  AoacState = MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0));
+    UINTN  Idx;
 
-    Print (L"AOAC I2C0 device state: 0x%02x %s\n", AoacState,
-           ((AoacState & FCH_AOAC_STATE_MASK) == FCH_AOAC_STATE_D0)
-             ? L"(already D0)" : L"(gated -- powering on)");
-    if ((AoacState & FCH_AOAC_STATE_MASK) != FCH_AOAC_STATE_D0) {
-      UINT8  Ctl;
-      UINTN  Us;
+    for (Idx = FCH_AOAC_DEV_I2C0; Idx <= FCH_AOAC_DEV_I2C3; Idx++) {
+      UINT8  AoacState = MmioRead8 (FCH_AOAC_DEV_STATUS (Idx));
 
-      Ctl  = MmioRead8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0));
-      Ctl &= ~FCH_AOAC_TARGET_STATE_MASK;
-      Ctl |= FCH_AOAC_PWR_ON_DEV;
-      MmioWrite8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0), Ctl);
-      for (Us = 0; Us < 100000; Us += 100) {
-        if ((MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)) & FCH_AOAC_STATE_MASK)
-            == FCH_AOAC_STATE_D0) {
-          break;
+      Print (L"AOAC I2C%u (dev %u) state: 0x%02x %s\n",
+             (UINT32)(Idx - FCH_AOAC_DEV_I2C0), (UINT32)Idx, AoacState,
+             ((AoacState & FCH_AOAC_STATE_MASK) == FCH_AOAC_STATE_D0)
+               ? L"(already D0)" : L"(gated -- powering on)");
+      if ((AoacState & FCH_AOAC_STATE_MASK) != FCH_AOAC_STATE_D0) {
+        UINT8  Ctl;
+        UINTN  Us;
+
+        Ctl  = MmioRead8 (FCH_AOAC_DEV_CTL (Idx));
+        Ctl &= ~FCH_AOAC_TARGET_STATE_MASK;
+        Ctl |= FCH_AOAC_PWR_ON_DEV;
+        MmioWrite8 (FCH_AOAC_DEV_CTL (Idx), Ctl);
+        for (Us = 0; Us < 100000; Us += 100) {
+          if ((MmioRead8 (FCH_AOAC_DEV_STATUS (Idx)) & FCH_AOAC_STATE_MASK)
+              == FCH_AOAC_STATE_D0) {
+            break;
+          }
+          gBS->Stall (100);
         }
-        gBS->Stall (100);
+        Print (L"AOAC I2C%u (dev %u) state now: 0x%02x\n",
+               (UINT32)(Idx - FCH_AOAC_DEV_I2C0), (UINT32)Idx,
+               MmioRead8 (FCH_AOAC_DEV_STATUS (Idx)));
       }
-      Print (L"AOAC I2C0 device state now: 0x%02x\n",
-             MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)));
     }
     Print (L"\n");
   }

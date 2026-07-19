@@ -123,6 +123,13 @@
 #define NVTK_I2C_ADDR       0x01
 
 //
+// FocalTech FTS3528 touchscreen 7-bit slave address, confirmed from the
+// Steam Deck OLED (Galileo) DSDT: \_SB.I2CB.TPNL _CRS I2cSerialBusV2 slave
+// 0x38 -- the classic FocalTech address.
+//
+#define FTS_I2C_ADDR        0x38
+
+//
 // Goodix candidate 7-bit slave addresses, kept for the fallback detection
 // sweep (other Ally-family panels are Goodix parts at one of these).
 //

@@ -1,9 +1,10 @@
 ## @file
-#  AllyTouchProbe -- standalone UEFI Shell app to test DesignWare I2C +
-#  Goodix GT7868Q liveness at the pre-boot stage (the project go/no-go check).
+#  TouchProbe -- standalone UEFI Shell app to test DesignWare I2C + HID-over-
+#  I2C touch panel liveness at the pre-boot stage (the per-device go/no-go
+#  check for TouchI2cDxe).
 #
 #  Build (inside an EDK2 workspace, same toolchain as UsbXbox360Dxe):
-#    build -p <YourPkg>/YourPkg.dsc -m AllyTouchI2cDxe/tools/probe/AllyTouchProbe.inf -a X64
+#    build -p <YourPkg>/YourPkg.dsc -m TouchI2cDxe/tools/probe/TouchProbe.inf -a X64
 #  or add this INF to your platform DSC [Components] and build.
 #
 #  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
@@ -12,14 +13,14 @@
 
 [Defines]
   INF_VERSION                    = 0x00010006
-  BASE_NAME                      = AllyTouchProbe
-  FILE_GUID                      = 6f2d9a10-1c3b-4c9e-9b2a-7a1f5d0e8c40
+  BASE_NAME                      = TouchProbe
+  FILE_GUID                      = 8023a2fd-b8dc-4774-92d7-27f5e75ffee7
   MODULE_TYPE                    = UEFI_APPLICATION
-  VERSION_STRING                 = 0.1
+  VERSION_STRING                 = 0.2
   ENTRY_POINT                    = UefiMain
 
 [Sources]
-  AllyTouchProbe.c
+  TouchProbe.c
 
 [Packages]
   MdePkg/MdePkg.dec

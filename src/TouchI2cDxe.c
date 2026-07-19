@@ -1,6 +1,11 @@
 /** @file
-  AllyTouchI2cDxe -- EFI_ABSOLUTE_POINTER_PROTOCOL producer for the ROG Xbox
-  Ally X Novatek NVTK0603 I2C-HID touchscreen, so rEFInd can be driven by touch.
+  TouchI2cDxe -- EFI_ABSOLUTE_POINTER_PROTOCOL producer for HID-over-I2C
+  touchscreens on AMD FCH (DesignWare AMDI0010) handhelds, so rEFInd can be
+  driven by touch. Grown out of AllyTouchI2cDxe; supported devices live in
+  the mProfiles table below:
+
+    - ASUS ROG Xbox Ally X      -- Novatek NVTK0603,  I2C0 @ 0xFEDC2000, addr 0x01
+    - Steam Deck OLED (Galileo) -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
 
     Layer 0  FCH AOAC power un-gating                 -- FchAoac.h + here
     Layer 1  DesignWare I2C master (MMIO, polled)     -- DwI2c.c
@@ -10,13 +15,13 @@
   Bring-up model (updated after on-hardware testing, 2026-07-17):
 
   In a normal boot the firmware leaves the FCH I2C controller tile power-gated
-  (AOAC device 5, see FchAoac.h), so the controller MMIO window reads garbage
-  until the tile is powered on -- and a driver load failure from that state
-  kept rEFInd from launching. On-hardware result three (touch works after a
-  volume-up boot, not after a normal one) exposed a second constraint: rEFInd
-  enumerates AbsolutePointer handles exactly once (pdInitialize(), a few
-  seconds after LoadDrivers()), so a protocol installed by a late background
-  retry is never seen. Three consequences drive the shape of this driver:
+  (see FchAoac.h), so the controller MMIO window reads garbage until the tile
+  is powered on -- and a driver load failure from that state kept rEFInd from
+  launching. On-hardware result three (touch works after a volume-up boot,
+  not after a normal one) exposed a second constraint: rEFInd enumerates
+  AbsolutePointer handles exactly once (pdInitialize(), a few seconds after
+  LoadDrivers()), so a protocol installed by a late background retry is never
+  seen. Three consequences drive the shape of this driver:
 
     1. The entry point never returns an error. If bring-up fails, the driver
        stays resident and retries on a 1 s timer; the boot manager is never
@@ -30,20 +35,27 @@
        use, so a late bring-up still delivers touch.
 
     3. The driver un-gates the I2C tile itself via the AOAC registers --
-       exactly what \_SB.I2CA._PS0 does -- before touching controller MMIO.
+       exactly what the DSDT's _PS0 does -- before touching controller MMIO.
        If the tile was freshly powered (firmware never programmed it), the
        full 400 kHz timing is programmed rather than inherited.
 
-  Detection targets the DSDT-confirmed panel first (controller 0xFEDC2000,
-  slave 0x01, HID descriptor register 0x0000) and falls back to a sweep of
-  the candidate controller bases x slave addresses x descriptor registers.
+  Detection walks the profile table first (each profile's DSDT-confirmed
+  controller base, slave address and HID descriptor register), then falls
+  back to a sweep of the candidate controller bases x slave addresses x
+  descriptor registers.
 
-  Every load appends a diagnostic record to \AllyTouch.log in the root of the
-  volume the driver was loaded from (the ESP -- /boot/AllyTouch.log from
-  Linux): pre-existing AbsolutePointer handle count (a nonzero count means the
-  firmware's own touch driver is resident, e.g. after a volume-up boot), AOAC
-  tile state, per-step bring-up results, the retry at which bring-up
-  succeeded, and a one-time record of the first touch report received.
+  A profile may carry a reset GPIO (FocalTech panels have an active-low
+  RESET line, GPIO 85 on Galileo). If that profile's controller answers but
+  the panel NAKs, the pin is driven/pulsed once and the normal 1 s retry
+  loop provides the ~300 ms the panel needs from reset-release to first
+  valid data (FocalTech application note timing).
+
+  Every load appends a diagnostic record to \TouchI2c.log in the root of the
+  volume the driver was loaded from (the ESP -- /boot/TouchI2c.log or
+  /esp/TouchI2c.log from Linux): pre-existing AbsolutePointer handle count
+  (a nonzero count means the firmware's own touch driver is resident), per
+  profile AOAC tile state, per-step bring-up results, the retry at which
+  bring-up succeeded, and a one-time record of the first touch report.
 
   Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -68,39 +80,70 @@
 #include "HidParse.h"
 
 //
-// Device-specific constants, confirmed from the Ally X (RC73XA) DSDT dump
-// (tools/allyx-hwinfo/acpi_disasm/DSDT.dsl):
-//   \_SB.I2CA (AMDI0010, _UID 0): Memory32Fixed 0xFEDC2000, len 0x1000
-//   \_SB.I2CA.TPL0 (_HID NVTK0603, _CID PNP0C50): I2cSerialBusV2 slave 0x01,
-//     400 kHz; _DSM(HID-I2C, func 1) returns HID descriptor register 0x0000.
+// AMD FCH GPIO bank: one 32-bit control register per pin. Bit 22 drives the
+// output value, bit 23 enables the output driver. Same model as coreboot
+// src/soc/amd/common/block/include/amdblocks/gpio_defs.h.
 //
-#define ALLY_I2C_BASE        DW_I2C_FCH_BASE_0   // 0xFEDC2000
-#define ALLY_I2C_SLAVE_ADDR  NVTK_I2C_ADDR       // 0x01
-#define ALLY_HID_DESC_REG    0x0000
+#define AMD_GPIO_BANK_BASE   0xFED81500
+#define AMD_GPIO_REG(Pin)    (AMD_GPIO_BANK_BASE + 4 * (UINT32)(Pin))
+#define AMD_GPIO_OUTPUT_VAL  BIT22
+#define AMD_GPIO_OUTPUT_EN   BIT23
 
-#define ALLY_DRIVER_VERSION  "v5"
+//
+// Per-device constants, each confirmed from that device's DSDT dump.
+//
+//   Ally X (RC73XA):  \_SB.I2CA (AMDI0010 _UID 0) Memory32Fixed 0xFEDC2000;
+//     \_SB.I2CA.TPL0 (NVTK0603/PNP0C50) I2cSerialBusV2 slave 0x01, 400 kHz;
+//     _DSM(HID-I2C, func 1) = 0x0000; AOAC device 5 (DSDT I2A0).
+//
+//   Steam Deck OLED (Galileo):  \_SB.I2CB (AMDI0010 _UID 1) Memory32Fixed
+//     0xFEDC3000; \_SB.I2CB.TPNL (FTS3528/PNP0C50) I2cSerialBusV2 slave
+//     0x38, 400 kHz; _DSM(HID-I2C, func 1) = 0x0000; AOAC device 6
+//     (DSDT I2CB.RSET calls SRAD(0x06)); active-low reset on GPIO 85
+//     (GpioIo output in TPNL._CRS; GpioInt 84 unused -- this driver polls).
+//
+typedef struct {
+  CONST CHAR8  *Name;
+  UINT32       I2cBase;
+  UINT8        SlaveAddr;
+  UINT16       HidDescReg;
+  UINT8        AoacDev;        // FCH AOAC device index of the I2C tile
+  UINT32       ResetGpioReg;   // pin control register; 0 = no reset line
+} TOUCH_PROFILE;
+
+STATIC CONST TOUCH_PROFILE  mProfiles[] = {
+  { "ROG Xbox Ally X (Novatek NVTK0603)",
+    DW_I2C_FCH_BASE_0, NVTK_I2C_ADDR, 0x0000, FCH_AOAC_DEV_I2C0, 0 },
+  { "Steam Deck OLED (FocalTech FTS3528)",
+    DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
+    AMD_GPIO_REG (85) },
+};
+
+#define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
+
+#define TOUCH_DRIVER_VERSION  "v6"
 
 //
 // Poll every 10 ms (EFI timer units are 100 ns). At 400 kHz a full
 // wMaxInputLength read takes well under 2 ms; 100 Hz polling keeps menu
 // tracking snappy.
 //
-#define ALLY_POLL_PERIOD      100000
+#define TOUCH_POLL_PERIOD      100000
 
-#define ALLY_RETRY_PERIOD     (1000 * 1000 * 10)  // 1 s in 100 ns units
-#define ALLY_RETRY_MAX        60                  // give up after ~60 s
+#define TOUCH_RETRY_PERIOD     (1000 * 1000 * 10)  // 1 s in 100 ns units
+#define TOUCH_RETRY_MAX        60                  // give up after ~60 s
 
 //
 // After RESET the device posts a 2-byte zero "reset acknowledge" on the input
 // path; wait up to this many 1 ms tries for it, then proceed regardless
 // (if the firmware already initialized the panel, a missed ack is not fatal).
 //
-#define ALLY_RESET_ACK_TRIES  200
+#define TOUCH_RESET_ACK_TRIES  200
 
 //
-// Keep \AllyTouch.log from growing without bound across boots.
+// Keep \TouchI2c.log from growing without bound across boots.
 //
-#define ALLY_LOG_MAX_SIZE     SIZE_32KB
+#define TOUCH_LOG_MAX_SIZE     SIZE_32KB
 
 typedef struct {
   UINT64                          Signature;
@@ -113,6 +156,8 @@ typedef struct {
   BOOLEAN                         NeedReinit;
   BOOLEAN                         Verbose;        // Print() allowed (load time)
   BOOLEAN                         FirstTouchLogged;
+  BOOLEAN                         ResetKicked[TOUCH_PROFILE_COUNT];
+  CONST TOUCH_PROFILE             *Profile;       // matched profile; may be NULL
   UINT32                          I2cBase;
   UINT8                           SlaveAddr;
   I2C_HID_DESCRIPTOR              HidDesc;
@@ -124,17 +169,17 @@ typedef struct {
   UINTN                           AttemptCount;
   EFI_HANDLE                      Handle;
   EFI_HANDLE                      LogDevice;      // ESP handle; NULL = no log
-} ALLY_TOUCH_DEV;
+} TOUCH_DEV;
 
-#define ALLY_TOUCH_SIG  SIGNATURE_64 ('A','l','l','y','T','c','h','1')
-#define ALLY_TOUCH_FROM_ABS(a) BASE_CR (a, ALLY_TOUCH_DEV, AbsolutePointer)
+#define TOUCH_SIG  SIGNATURE_64 ('T','c','h','I','2','c','D','x')
+#define TOUCH_FROM_ABS(a) BASE_CR (a, TOUCH_DEV, AbsolutePointer)
 
 STATIC CONST UINT32  mCandidateBases[] = {
   DW_I2C_FCH_BASE_0, DW_I2C_FCH_BASE_1, DW_I2C_FCH_BASE_2,
   DW_I2C_FCH_BASE_3, DW_I2C_FCH_BASE_4
 };
 STATIC CONST UINT8   mCandidateAddrs[]    = {
-  NVTK_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
+  NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
 };
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
 
@@ -143,7 +188,7 @@ STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
 // ---------------------------------------------------------------------------
 
 /**
-  Append one line to \AllyTouch.log on the volume this driver was loaded
+  Append one line to \TouchI2c.log on the volume this driver was loaded
   from. Open/write/close per call so every line survives an immediate reboot
   and no handle is held across rEFInd's own filesystem use. Safe at
   TPL_CALLBACK (the FAT driver's own working TPL).
@@ -151,9 +196,9 @@ STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
 STATIC
 VOID
 EFIAPI
-AllyLog (
-  IN ALLY_TOUCH_DEV  *Dev,
-  IN CONST CHAR8     *Fmt,
+TouchLog (
+  IN TOUCH_DEV    *Dev,
+  IN CONST CHAR8  *Fmt,
   ...
   )
 {
@@ -182,14 +227,14 @@ AllyLog (
     return;
   }
 
-  if (!EFI_ERROR (Root->Open (Root, &File, L"AllyTouch.log",
+  if (!EFI_ERROR (Root->Open (Root, &File, L"TouchI2c.log",
                               EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
                               EFI_FILE_MODE_CREATE, 0))) {
     if (!EFI_ERROR (File->SetPosition (File, MAX_UINT64)) &&
         !EFI_ERROR (File->GetPosition (File, &Pos)) &&
-        (Pos > ALLY_LOG_MAX_SIZE)) {
+        (Pos > TOUCH_LOG_MAX_SIZE)) {
       File->Delete (File);              // closes the handle; start over fresh
-      if (EFI_ERROR (Root->Open (Root, &File, L"AllyTouch.log",
+      if (EFI_ERROR (Root->Open (Root, &File, L"TouchI2c.log",
                                  EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
                                  EFI_FILE_MODE_CREATE, 0))) {
         Root->Close (Root);
@@ -203,13 +248,13 @@ AllyLog (
 }
 
 /**
-  Record where this image was loaded from, so AllyLog can reach the ESP.
+  Record where this image was loaded from, so TouchLog can reach the ESP.
 **/
 STATIC
 VOID
-AllyLogInit (
-  IN ALLY_TOUCH_DEV  *Dev,
-  IN EFI_HANDLE      ImageHandle
+TouchLogInit (
+  IN TOUCH_DEV   *Dev,
+  IN EFI_HANDLE  ImageHandle
   )
 {
   EFI_LOADED_IMAGE_PROTOCOL  *LoadedImage;
@@ -226,10 +271,11 @@ AllyLogInit (
 // ---------------------------------------------------------------------------
 
 /**
-  Make sure the I2C controller tile is out of D3 before its MMIO window is
-  touched. Mirrors \_SB.I2CA._PS0 -> \_SB.DSAD (5, 0): request D0, set
+  Make sure an I2C controller tile is out of D3 before its MMIO window is
+  touched. Mirrors the DSDT's _PS0 -> DSAD (AoacDev, 0): request D0, set
   PwrOnDev, wait for the state ladder to report fully-on.
 
+  @param[in]  AoacDev       AOAC device index of the tile (FchAoac.h).
   @param[out] FreshPowerOn  TRUE if the tile was gated and this call powered
                             it on (i.e. firmware never programmed it and the
                             bus timing must not be inherited).
@@ -240,6 +286,7 @@ AllyLogInit (
 STATIC
 EFI_STATUS
 FchAoacPowerOnI2c (
+  IN  UINT8    AoacDev,
   OUT BOOLEAN  *FreshPowerOn
   )
 {
@@ -248,27 +295,28 @@ FchAoacPowerOnI2c (
 
   *FreshPowerOn = FALSE;
 
-  if ((MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)) & FCH_AOAC_STATE_MASK)
+  if ((MmioRead8 (FCH_AOAC_DEV_STATUS (AoacDev)) & FCH_AOAC_STATE_MASK)
       == FCH_AOAC_STATE_D0) {
     return EFI_SUCCESS;
   }
 
-  Ctl  = MmioRead8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0));
+  Ctl  = MmioRead8 (FCH_AOAC_DEV_CTL (AoacDev));
   Ctl &= ~FCH_AOAC_TARGET_STATE_MASK;            // target D0
   Ctl |= FCH_AOAC_PWR_ON_DEV;
-  MmioWrite8 (FCH_AOAC_DEV_CTL (FCH_AOAC_DEV_I2C0), Ctl);
+  MmioWrite8 (FCH_AOAC_DEV_CTL (AoacDev), Ctl);
 
   for (WaitedUs = 0; WaitedUs < 100000; WaitedUs += 100) {
-    if ((MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)) & FCH_AOAC_STATE_MASK)
+    if ((MmioRead8 (FCH_AOAC_DEV_STATUS (AoacDev)) & FCH_AOAC_STATE_MASK)
         == FCH_AOAC_STATE_D0) {
       *FreshPowerOn = TRUE;
-      DEBUG ((DEBUG_INFO, "AllyTouch: AOAC powered on I2C0 tile\n"));
+      DEBUG ((DEBUG_INFO, "TouchI2c: AOAC powered on I2C tile %d\n", AoacDev));
       return EFI_SUCCESS;
     }
     gBS->Stall (100);
   }
 
-  DEBUG ((DEBUG_ERROR, "AllyTouch: AOAC power-on of I2C0 timed out\n"));
+  DEBUG ((DEBUG_ERROR, "TouchI2c: AOAC power-on of tile %d timed out\n",
+          AoacDev));
   return EFI_TIMEOUT;
 }
 
@@ -278,13 +326,13 @@ FchAoacPowerOnI2c (
 
 EFI_STATUS
 EFIAPI
-AllyTouchReset (
+TouchReset (
   IN EFI_ABSOLUTE_POINTER_PROTOCOL  *This,
   IN BOOLEAN                        ExtendedVerification
   )
 {
-  ALLY_TOUCH_DEV  *Dev = ALLY_TOUCH_FROM_ABS (This);
-  EFI_TPL         OldTpl;
+  TOUCH_DEV  *Dev = TOUCH_FROM_ABS (This);
+  EFI_TPL    OldTpl;
 
   OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
   ZeroMem (&Dev->State, sizeof (Dev->State));
@@ -299,13 +347,13 @@ AllyTouchReset (
 
 EFI_STATUS
 EFIAPI
-AllyTouchGetState (
+TouchGetState (
   IN OUT EFI_ABSOLUTE_POINTER_PROTOCOL  *This,
   OUT    EFI_ABSOLUTE_POINTER_STATE     *State
   )
 {
-  ALLY_TOUCH_DEV  *Dev = ALLY_TOUCH_FROM_ABS (This);
-  EFI_TPL         OldTpl;
+  TOUCH_DEV  *Dev = TOUCH_FROM_ABS (This);
+  EFI_TPL    OldTpl;
 
   if (State == NULL) {
     return EFI_INVALID_PARAMETER;
@@ -325,12 +373,12 @@ AllyTouchGetState (
 STATIC
 VOID
 EFIAPI
-AllyTouchWaitForInput (
+TouchWaitForInput (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   )
 {
-  ALLY_TOUCH_DEV  *Dev = (ALLY_TOUCH_DEV *)Context;
+  TOUCH_DEV  *Dev = (TOUCH_DEV *)Context;
 
   if (Dev->Ready && Dev->StateChanged) {
     gBS->SignalEvent (Event);
@@ -343,19 +391,19 @@ AllyTouchWaitForInput (
 STATIC
 VOID
 EFIAPI
-AllyTouchPoll (
+TouchPoll (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   )
 {
-  ALLY_TOUCH_DEV  *Dev = (ALLY_TOUCH_DEV *)Context;
-  EFI_STATUS      Status;
-  UINTN           Len;
-  UINT8           *Payload;
-  UINTN           PayloadLen;
-  BOOLEAN         Tip;
-  UINT32          X;
-  UINT32          Y;
+  TOUCH_DEV   *Dev = (TOUCH_DEV *)Context;
+  EFI_STATUS  Status;
+  UINTN       Len;
+  UINT8       *Payload;
+  UINTN       PayloadLen;
+  BOOLEAN     Tip;
+  UINT32      X;
+  UINT32      Y;
 
   if (!Dev->Ready) {
     return;
@@ -404,8 +452,8 @@ AllyTouchPoll (
 
   if (!Dev->FirstTouchLogged && Tip) {
     Dev->FirstTouchLogged = TRUE;
-    AllyLog (Dev, "first touch report: x=%d y=%d (input path live)",
-             (UINT32)X, (UINT32)Y);
+    TouchLog (Dev, "first touch report: x=%d y=%d (input path live)",
+              (UINT32)X, (UINT32)Y);
   }
 
   if (Tip || Dev->LastTip) {
@@ -427,12 +475,12 @@ AllyTouchPoll (
 STATIC
 VOID
 EFIAPI
-AllyTouchExitBootServices (
+TouchExitBootServices (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   )
 {
-  ALLY_TOUCH_DEV  *Dev = (ALLY_TOUCH_DEV *)Context;
+  TOUCH_DEV  *Dev = (TOUCH_DEV *)Context;
 
   gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
   if (Dev->Ready) {
@@ -445,59 +493,130 @@ AllyTouchExitBootServices (
 // ---------------------------------------------------------------------------
 
 /**
-  Find the panel: un-gate the I2C tile, try the DSDT-confirmed target first,
-  then sweep controllers x addresses x descriptor registers. On success
-  Dev->I2cBase / Dev->SlaveAddr / Dev->HidDesc are filled and the controller
-  is initialized and targeting the panel.
+  One-shot best-effort kick of a profile's panel reset line (active low, as
+  on the FocalTech FTS3528). If the pin is already driven high, pulse a real
+  reset; if it is not driven at all, enable the output and release reset.
+  The caller's retry cadence (1 s) covers the panel's reset-to-ready time
+  (~300 ms on FocalTech parts), so this function does not wait.
+**/
+STATIC
+VOID
+TouchResetKick (
+  IN TOUCH_DEV            *Dev,
+  IN CONST TOUCH_PROFILE  *Profile
+  )
+{
+  UINT32  Reg;
+
+  Reg = MmioRead32 (Profile->ResetGpioReg);
+  if ((Reg & (AMD_GPIO_OUTPUT_EN | AMD_GPIO_OUTPUT_VAL)) ==
+      (AMD_GPIO_OUTPUT_EN | AMD_GPIO_OUTPUT_VAL)) {
+    MmioWrite32 (Profile->ResetGpioReg, Reg & ~AMD_GPIO_OUTPUT_VAL);
+    gBS->Stall (5000);
+    MmioWrite32 (Profile->ResetGpioReg, Reg);
+  } else {
+    MmioWrite32 (Profile->ResetGpioReg,
+                 Reg | AMD_GPIO_OUTPUT_EN | AMD_GPIO_OUTPUT_VAL);
+  }
+  TouchLog (Dev, "reset GPIO kick @0x%08x: 0x%08x -> 0x%08x (re-probing on "
+            "later retries)",
+            Profile->ResetGpioReg, Reg, MmioRead32 (Profile->ResetGpioReg));
+}
+
+/**
+  Find the panel: walk the profile table (un-gating each profile's I2C tile
+  and trying its DSDT-confirmed constants), then sweep controllers x
+  addresses x descriptor registers. On success Dev->I2cBase / Dev->SlaveAddr
+  / Dev->HidDesc / Dev->Profile are filled and the controller is initialized
+  and targeting the panel.
+
+  @param[out] ProfStatus  Per-profile probe result (TOUCH_PROFILE_COUNT
+                          entries), for diagnostics.
 **/
 STATIC
 EFI_STATUS
-AllyTouchDetect (
-  IN OUT ALLY_TOUCH_DEV  *Dev,
-  OUT    EFI_STATUS      *ConfirmedTargetStatus
+TouchDetect (
+  IN OUT TOUCH_DEV   *Dev,
+  OUT    EFI_STATUS  *ProfStatus
   )
 {
   EFI_STATUS  Status;
   BOOLEAN     Fresh;
-  UINTN       b, a, r;
+  BOOLEAN     FreshByTile[4];
+  UINTN       p, b, a, r;
 
-  *ConfirmedTargetStatus = EFI_NOT_STARTED;
-
-  Status = FchAoacPowerOnI2c (&Fresh);
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
+  ZeroMem (FreshByTile, sizeof (FreshByTile));
 
   //
-  // Confirmed target: I2CA @ 0xFEDC2000, Novatek @ 0x01, descriptor @ 0x0000.
+  // Profile pass: each profile's own tile, base, address, descriptor
+  // register. First match wins.
   //
-  if (DwI2cControllerPresent (ALLY_I2C_BASE)) {
-    Status = DwI2cInit (ALLY_I2C_BASE, ALLY_I2C_SLAVE_ADDR, Fresh);
+  for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+    CONST TOUCH_PROFILE  *Prof = &mProfiles[p];
+
+    Status = FchAoacPowerOnI2c (Prof->AoacDev, &Fresh);
+    if (EFI_ERROR (Status)) {
+      ProfStatus[p] = Status;
+      continue;
+    }
+    if (Fresh &&
+        (Prof->AoacDev >= FCH_AOAC_DEV_I2C0) &&
+        (Prof->AoacDev <= FCH_AOAC_DEV_I2C3)) {
+      FreshByTile[Prof->AoacDev - FCH_AOAC_DEV_I2C0] = TRUE;
+    }
+
+    if (!DwI2cControllerPresent (Prof->I2cBase)) {
+      ProfStatus[p] = EFI_NO_MAPPING;            // COMP_TYPE mismatch
+      continue;
+    }
+
+    Status = DwI2cInit (Prof->I2cBase, Prof->SlaveAddr, Fresh);
     if (!EFI_ERROR (Status)) {
-      Status = I2cHidReadDescriptor (ALLY_I2C_BASE, ALLY_HID_DESC_REG,
+      Status = I2cHidReadDescriptor (Prof->I2cBase, Prof->HidDescReg,
                                      &Dev->HidDesc);
     }
-    *ConfirmedTargetStatus = Status;
+    ProfStatus[p] = Status;
     if (!EFI_ERROR (Status)) {
-      Dev->I2cBase   = ALLY_I2C_BASE;
-      Dev->SlaveAddr = ALLY_I2C_SLAVE_ADDR;
+      Dev->I2cBase   = Prof->I2cBase;
+      Dev->SlaveAddr = Prof->SlaveAddr;
+      Dev->Profile   = Prof;
       return EFI_SUCCESS;
     }
-  } else {
-    *ConfirmedTargetStatus = EFI_NO_MAPPING;   // COMP_TYPE mismatch
+
+    //
+    // Controller is alive but the panel did not answer: if this profile has
+    // a reset line, kick it once. The retry loop re-probes after the panel's
+    // reset-to-ready time has passed.
+    //
+    if ((Prof->ResetGpioReg != 0) && !Dev->ResetKicked[p] &&
+        (Status == EFI_NO_RESPONSE)) {
+      TouchResetKick (Dev, Prof);
+      Dev->ResetKicked[p] = TRUE;
+    }
   }
 
   //
-  // Fallback sweep for panel/board variants. Only controllers whose tile is
-  // already powered respond to the COMP_TYPE probe.
+  // Fallback sweep for panel/board variants. Un-gate all four fixed-base
+  // tiles so the COMP_TYPE probe sees them; DW_I2C_FCH_BASE_4 has no known
+  // AOAC index and is probed only if already powered.
   //
+  for (b = 0; b < 4; b++) {
+    if (!EFI_ERROR (FchAoacPowerOnI2c ((UINT8)(FCH_AOAC_DEV_I2C0 + b), &Fresh))
+        && Fresh) {
+      FreshByTile[b] = TRUE;
+    }
+  }
+
   for (b = 0; b < ARRAY_SIZE (mCandidateBases); b++) {
+    BOOLEAN  TileFresh;
+
     if (!DwI2cControllerPresent (mCandidateBases[b])) {
       continue;
     }
+    TileFresh = (b < 4) ? FreshByTile[b] : FALSE;
     for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
       if (EFI_ERROR (DwI2cInit (mCandidateBases[b], mCandidateAddrs[a],
-                                (mCandidateBases[b] == ALLY_I2C_BASE) && Fresh))) {
+                                TileFresh))) {
         continue;
       }
       for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
@@ -506,6 +625,7 @@ AllyTouchDetect (
                                               &Dev->HidDesc))) {
           Dev->I2cBase   = mCandidateBases[b];
           Dev->SlaveAddr = mCandidateAddrs[a];
+          Dev->Profile   = NULL;                 // found by sweep
           return EFI_SUCCESS;
         }
       }
@@ -524,8 +644,8 @@ AllyTouchDetect (
 **/
 STATIC
 BOOLEAN
-AllyTouchBringUp (
-  IN ALLY_TOUCH_DEV  *Dev
+TouchBringUp (
+  IN TOUCH_DEV  *Dev
   )
 {
   UINTN  Try;
@@ -538,7 +658,7 @@ AllyTouchBringUp (
   if (EFI_ERROR (I2cHidReset (Dev->I2cBase, Dev->HidDesc.wCommandRegister))) {
     return FALSE;
   }
-  for (Try = 0; Try < ALLY_RESET_ACK_TRIES; Try++) {
+  for (Try = 0; Try < TOUCH_RESET_ACK_TRIES; Try++) {
     if (!EFI_ERROR (I2cHidRawRead (Dev->I2cBase, Ack, sizeof (Ack))) &&
         (Ack[0] == 0) && (Ack[1] == 0)) {
       return TRUE;
@@ -557,15 +677,16 @@ AllyTouchBringUp (
 **/
 STATIC
 EFI_STATUS
-AllyTouchTryBringUp (
-  IN OUT ALLY_TOUCH_DEV  *Dev
+TouchTryBringUp (
+  IN OUT TOUCH_DEV  *Dev
   )
 {
   EFI_STATUS  Status;
-  EFI_STATUS  ConfirmedStatus;
+  EFI_STATUS  ProfStatus[TOUCH_PROFILE_COUNT];
   UINT8       *ReportDesc;
   BOOLEAN     AckSeen;
   BOOLEAN     LogAttempt;
+  UINTN       p;
 
   ReportDesc = NULL;
   Dev->AttemptCount++;
@@ -585,28 +706,37 @@ AllyTouchTryBringUp (
   Dev->StateChanged = FALSE;
   Dev->LastTip      = FALSE;
   Dev->NeedReinit   = FALSE;
+  Dev->Profile      = NULL;
+  for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+    ProfStatus[p] = EFI_NOT_STARTED;
+  }
 
-  Status = AllyTouchDetect (Dev, &ConfirmedStatus);
+  Status = TouchDetect (Dev, ProfStatus);
   if (EFI_ERROR (Status)) {
     if (LogAttempt) {
-      AllyLog (Dev, "attempt %d: detect failed (%r; confirmed target 0x%08x/0x%02x: %r)",
-               (UINT32)Dev->AttemptCount, Status,
-               ALLY_I2C_BASE, ALLY_I2C_SLAVE_ADDR, ConfirmedStatus);
+      TouchLog (Dev, "attempt %d: detect failed (%r)",
+                (UINT32)Dev->AttemptCount, Status);
+      for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+        TouchLog (Dev, "  profile '%a' (0x%08x/0x%02x): %r",
+                  mProfiles[p].Name, mProfiles[p].I2cBase,
+                  mProfiles[p].SlaveAddr, ProfStatus[p]);
+      }
     }
     if (Dev->Verbose) {
-      Print (L"AllyTouchI2cDxe: no HID-over-I2C touch panel answered "
+      Print (L"TouchI2cDxe: no HID-over-I2C touch panel answered "
              L"(panel not powered at this stage?) -- will keep retrying.\n");
     }
     return Status;
   }
 
-  AllyLog (Dev, "attempt %d: panel at base 0x%08x addr 0x%02x, VID 0x%04x "
-           "PID 0x%04x, reportdesc %d bytes, maxinput %d",
-           (UINT32)Dev->AttemptCount, Dev->I2cBase, Dev->SlaveAddr,
-           Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID,
-           Dev->HidDesc.wReportDescLength, Dev->HidDesc.wMaxInputLength);
+  TouchLog (Dev, "attempt %d: panel at base 0x%08x addr 0x%02x (%a), "
+            "VID 0x%04x PID 0x%04x, reportdesc %d bytes, maxinput %d",
+            (UINT32)Dev->AttemptCount, Dev->I2cBase, Dev->SlaveAddr,
+            (Dev->Profile != NULL) ? Dev->Profile->Name : "fallback sweep",
+            Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID,
+            Dev->HidDesc.wReportDescLength, Dev->HidDesc.wMaxInputLength);
   if (Dev->Verbose) {
-    Print (L"AllyTouchI2cDxe: panel at I2C base 0x%08x addr 0x%02x, "
+    Print (L"TouchI2cDxe: panel at I2C base 0x%08x addr 0x%02x, "
            L"VID 0x%04x PID 0x%04x\n",
            Dev->I2cBase, Dev->SlaveAddr,
            Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID);
@@ -622,8 +752,8 @@ AllyTouchTryBringUp (
   Status = I2cHidReadRegister (Dev->I2cBase, Dev->HidDesc.wReportDescRegister,
                                ReportDesc, Dev->HidDesc.wReportDescLength);
   if (EFI_ERROR (Status)) {
-    AllyLog (Dev, "attempt %d: report descriptor read failed: %r",
-             (UINT32)Dev->AttemptCount, Status);
+    TouchLog (Dev, "attempt %d: report descriptor read failed: %r",
+              (UINT32)Dev->AttemptCount, Status);
     goto Fail;
   }
 
@@ -640,8 +770,8 @@ AllyTouchTryBringUp (
   Status = HidParseTouchLayout (ReportDesc, Dev->HidDesc.wReportDescLength,
                                 &Dev->Layout);
   if (EFI_ERROR (Status)) {
-    AllyLog (Dev, "attempt %d: no touch (tip+X+Y) report in descriptor",
-             (UINT32)Dev->AttemptCount);
+    TouchLog (Dev, "attempt %d: no touch (tip+X+Y) report in descriptor",
+              (UINT32)Dev->AttemptCount);
     goto Fail;
   }
   FreePool (ReportDesc);
@@ -666,7 +796,7 @@ AllyTouchTryBringUp (
     goto Fail;
   }
 
-  AckSeen = AllyTouchBringUp (Dev);
+  AckSeen = TouchBringUp (Dev);
 
   //
   // Publish the real coordinate ranges behind the installed protocol, then
@@ -677,21 +807,21 @@ AllyTouchTryBringUp (
   Dev->Mode.AbsoluteMaxY = Dev->Layout.YLogicalMax;
 
   Dev->Ready = TRUE;
-  Status = gBS->SetTimer (Dev->PollEvent, TimerPeriodic, ALLY_POLL_PERIOD);
+  Status = gBS->SetTimer (Dev->PollEvent, TimerPeriodic, TOUCH_POLL_PERIOD);
   if (EFI_ERROR (Status)) {
     Dev->Ready = FALSE;
     goto Fail;
   }
 
-  AllyLog (Dev, "attempt %d: READY (reset ack %a, report id %d, range %dx%d)",
-           (UINT32)Dev->AttemptCount, AckSeen ? "seen" : "not seen",
-           Dev->Layout.HasReportId ? Dev->Layout.ReportId : 0,
-           Dev->Layout.XLogicalMax, Dev->Layout.YLogicalMax);
+  TouchLog (Dev, "attempt %d: READY (reset ack %a, report id %d, range %dx%d)",
+            (UINT32)Dev->AttemptCount, AckSeen ? "seen" : "not seen",
+            Dev->Layout.HasReportId ? Dev->Layout.ReportId : 0,
+            Dev->Layout.XLogicalMax, Dev->Layout.YLogicalMax);
   if (Dev->Verbose) {
-    Print (L"AllyTouchI2cDxe: touch input live (%ux%u).\n",
+    Print (L"TouchI2cDxe: touch input live (%ux%u).\n",
            (UINT32)Dev->Mode.AbsoluteMaxX, (UINT32)Dev->Mode.AbsoluteMaxY);
   }
-  DEBUG ((DEBUG_INFO, "AllyTouch: input live (%dx%d)\n",
+  DEBUG ((DEBUG_INFO, "TouchI2c: input live (%dx%d)\n",
           (UINT32)Dev->Mode.AbsoluteMaxX, (UINT32)Dev->Mode.AbsoluteMaxY));
   return EFI_SUCCESS;
 
@@ -715,20 +845,20 @@ Fail:
 STATIC
 VOID
 EFIAPI
-AllyTouchRetry (
+TouchRetry (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   )
 {
-  ALLY_TOUCH_DEV  *Dev = (ALLY_TOUCH_DEV *)Context;
+  TOUCH_DEV  *Dev = (TOUCH_DEV *)Context;
 
-  if (!EFI_ERROR (AllyTouchTryBringUp (Dev))) {
-    DEBUG ((DEBUG_INFO, "AllyTouch: bring-up succeeded on attempt %d\n",
+  if (!EFI_ERROR (TouchTryBringUp (Dev))) {
+    DEBUG ((DEBUG_INFO, "TouchI2c: bring-up succeeded on attempt %d\n",
             (UINT32)Dev->AttemptCount));
-  } else if (Dev->AttemptCount < ALLY_RETRY_MAX) {
+  } else if (Dev->AttemptCount < TOUCH_RETRY_MAX) {
     return;                                // periodic timer fires again
   } else {
-    AllyLog (Dev, "giving up after %d attempts", (UINT32)Dev->AttemptCount);
+    TouchLog (Dev, "giving up after %d attempts", (UINT32)Dev->AttemptCount);
   }
 
   gBS->SetTimer (Event, TimerCancel, 0);
@@ -738,16 +868,17 @@ AllyTouchRetry (
 
 EFI_STATUS
 EFIAPI
-AllyTouchI2cDxeEntry (
+TouchI2cDxeEntry (
   IN EFI_HANDLE        ImageHandle,
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  EFI_STATUS      Status;
-  ALLY_TOUCH_DEV  *Dev;
-  EFI_HANDLE      *Handles;
-  UINTN           HandleCount;
-  EFI_TIME        Time;
+  EFI_STATUS  Status;
+  TOUCH_DEV   *Dev;
+  EFI_HANDLE  *Handles;
+  UINTN       HandleCount;
+  EFI_TIME    Time;
+  UINTN       p;
 
   //
   // This driver must never fail its entry point: rEFInd treats a driver
@@ -755,25 +886,25 @@ AllyTouchI2cDxeEntry (
   // on hardware). If anything goes wrong the driver stays resident and
   // inert, or retries in the background.
   //
-  Dev = AllocateZeroPool (sizeof (ALLY_TOUCH_DEV));
+  Dev = AllocateZeroPool (sizeof (TOUCH_DEV));
   if (Dev == NULL) {
     return EFI_SUCCESS;
   }
-  Dev->Signature = ALLY_TOUCH_SIG;
+  Dev->Signature = TOUCH_SIG;
   Dev->Verbose   = TRUE;
 
-  AllyLogInit (Dev, ImageHandle);
+  TouchLogInit (Dev, ImageHandle);
   if (EFI_ERROR (gRT->GetTime (&Time, NULL))) {
     ZeroMem (&Time, sizeof (Time));
   }
-  AllyLog (Dev, "==== AllyTouchI2cDxe %a load %04d-%02d-%02d %02d:%02d:%02d ====",
-           ALLY_DRIVER_VERSION, Time.Year, Time.Month, Time.Day,
-           Time.Hour, Time.Minute, Time.Second);
+  TouchLog (Dev, "==== TouchI2cDxe %a load %04d-%02d-%02d %02d:%02d:%02d ====",
+            TOUCH_DRIVER_VERSION, Time.Year, Time.Month, Time.Day,
+            Time.Hour, Time.Minute, Time.Second);
 
   //
   // Census before we install anything: a nonzero count means the firmware's
-  // own touch driver is resident (seen after a volume-up boot), i.e. touch
-  // in rEFInd may be its doing rather than ours.
+  // own touch driver is resident (seen after a volume-up boot on the Ally),
+  // i.e. touch in rEFInd may be its doing rather than ours.
   //
   HandleCount = 0;
   Handles     = NULL;
@@ -782,13 +913,16 @@ AllyTouchI2cDxeEntry (
                                            NULL, &HandleCount, &Handles))) {
     FreePool (Handles);
   }
-  AllyLog (Dev, "pre-existing AbsolutePointer handles: %d; AOAC I2C0 status "
-           "0x%02x; COMP_TYPE@%08x 0x%08x COMP_VERSION 0x%08x",
-           (UINT32)HandleCount,
-           MmioRead8 (FCH_AOAC_DEV_STATUS (FCH_AOAC_DEV_I2C0)),
-           ALLY_I2C_BASE,
-           MmioRead32 ((UINTN)ALLY_I2C_BASE + DW_IC_COMP_TYPE),
-           MmioRead32 ((UINTN)ALLY_I2C_BASE + DW_IC_COMP_VERSION));
+  TouchLog (Dev, "pre-existing AbsolutePointer handles: %d",
+            (UINT32)HandleCount);
+  for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+    TouchLog (Dev, "profile '%a': AOAC dev %d status 0x%02x; COMP_TYPE@%08x "
+              "0x%08x",
+              mProfiles[p].Name, mProfiles[p].AoacDev,
+              MmioRead8 (FCH_AOAC_DEV_STATUS (mProfiles[p].AoacDev)),
+              mProfiles[p].I2cBase,
+              MmioRead32 ((UINTN)mProfiles[p].I2cBase + DW_IC_COMP_TYPE));
+  }
 
   //
   // Install the protocol immediately -- rEFInd enumerates AbsolutePointer
@@ -805,23 +939,23 @@ AllyTouchI2cDxeEntry (
   Dev->Mode.AbsoluteMaxZ = 0;
   Dev->Mode.Attributes   = 0;
 
-  Dev->AbsolutePointer.Reset    = AllyTouchReset;
-  Dev->AbsolutePointer.GetState = AllyTouchGetState;
+  Dev->AbsolutePointer.Reset    = TouchReset;
+  Dev->AbsolutePointer.GetState = TouchGetState;
   Dev->AbsolutePointer.Mode     = &Dev->Mode;
 
   Status = gBS->CreateEvent (EVT_NOTIFY_WAIT, TPL_NOTIFY,
-                             AllyTouchWaitForInput, Dev,
+                             TouchWaitForInput, Dev,
                              &Dev->AbsolutePointer.WaitForInput);
   if (EFI_ERROR (Status)) {
     return EFI_SUCCESS;                    // inert but resident
   }
   Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                             AllyTouchPoll, Dev, &Dev->PollEvent);
+                             TouchPoll, Dev, &Dev->PollEvent);
   if (EFI_ERROR (Status)) {
     return EFI_SUCCESS;
   }
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY,
-                             AllyTouchExitBootServices, Dev,
+                             TouchExitBootServices, Dev,
                              &Dev->ExitBootEvent);
   if (EFI_ERROR (Status)) {
     return EFI_SUCCESS;
@@ -832,20 +966,20 @@ AllyTouchI2cDxeEntry (
                   &gEfiAbsolutePointerProtocolGuid, &Dev->AbsolutePointer,
                   NULL);
   if (EFI_ERROR (Status)) {
-    AllyLog (Dev, "protocol install failed: %r", Status);
+    TouchLog (Dev, "protocol install failed: %r", Status);
     return EFI_SUCCESS;
   }
-  AllyLog (Dev, "AbsolutePointer protocol installed at entry");
+  TouchLog (Dev, "AbsolutePointer protocol installed at entry");
 
-  Status = AllyTouchTryBringUp (Dev);
+  Status = TouchTryBringUp (Dev);
   Dev->Verbose = FALSE;
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_WARN, "AllyTouch: bring-up failed at load: %r -- "
-            "retrying every 1 s (max %d)\n", Status, ALLY_RETRY_MAX));
+    DEBUG ((DEBUG_WARN, "TouchI2c: bring-up failed at load: %r -- "
+            "retrying every 1 s (max %d)\n", Status, TOUCH_RETRY_MAX));
     Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                               AllyTouchRetry, Dev, &Dev->RetryEvent);
+                               TouchRetry, Dev, &Dev->RetryEvent);
     if (!EFI_ERROR (Status)) {
-      gBS->SetTimer (Dev->RetryEvent, TimerPeriodic, ALLY_RETRY_PERIOD);
+      gBS->SetTimer (Dev->RetryEvent, TimerPeriodic, TOUCH_RETRY_PERIOD);
     }
   }
 

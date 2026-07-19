@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test build script for AllyTouchI2cDxe (driver + probe).
+# Test build script for TouchI2cDxe (driver + probe).
 # Same approach as UsbXbox360Dxe's test_build.sh: clone EDK2, drop the sources
 # into MdeModulePkg, build just these modules. Mirrors .github/workflows/build.yml.
 
@@ -16,7 +16,7 @@ EDK2_BRANCH="edk2-stable202411"
 ARCH="X64"
 TOOLCHAIN="GCC5"
 BUILD_TYPE="${BUILD_TYPE:-RELEASE}"
-MODULE_DIR="MdeModulePkg/AllyTouchI2cDxe"
+MODULE_DIR="MdeModulePkg/TouchI2cDxe"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -70,21 +70,21 @@ mkdir -p "$MODULE_DIR"
 cp -r "$SCRIPT_DIR"/src "$SCRIPT_DIR"/tools "$MODULE_DIR"/
 
 echo -e "${YELLOW}[6/8] Adding modules to build configuration...${NC}"
-if ! grep -q "AllyTouchI2cDxe/src/AllyTouchI2cDxe.inf" MdeModulePkg/MdeModulePkg.dsc; then
-    sed -i "/\[Components\]/a \  $MODULE_DIR/src/AllyTouchI2cDxe.inf\n  $MODULE_DIR/tools/probe/AllyTouchProbe.inf" MdeModulePkg/MdeModulePkg.dsc
+if ! grep -q "TouchI2cDxe/src/TouchI2cDxe.inf" MdeModulePkg/MdeModulePkg.dsc; then
+    sed -i "/\[Components\]/a \  $MODULE_DIR/src/TouchI2cDxe.inf\n  $MODULE_DIR/tools/probe/TouchProbe.inf" MdeModulePkg/MdeModulePkg.dsc
 fi
 
 echo -e "${YELLOW}[7/8] Building driver + probe (${BUILD_TYPE})...${NC}"
 build -a $ARCH -t $TOOLCHAIN -b $BUILD_TYPE \
-      -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/src/AllyTouchI2cDxe.inf"
+      -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/src/TouchI2cDxe.inf"
 build -a $ARCH -t $TOOLCHAIN -b $BUILD_TYPE \
-      -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/tools/probe/AllyTouchProbe.inf"
+      -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/tools/probe/TouchProbe.inf"
 
 echo -e "${YELLOW}[8/8] Preparing output...${NC}"
 cd "$SCRIPT_DIR"
 mkdir -p output
 OUT_DIR="$BUILD_DIR/edk2/Build/MdeModule/${BUILD_TYPE}_${TOOLCHAIN}/${ARCH}"
-for f in AllyTouchI2cDxe.efi AllyTouchProbe.efi; do
+for f in TouchI2cDxe.efi TouchProbe.efi; do
     if [ ! -f "$OUT_DIR/$f" ]; then
         echo -e "${RED}Error: $f not found at $OUT_DIR${NC}"
         exit 1
@@ -93,5 +93,5 @@ for f in AllyTouchI2cDxe.efi AllyTouchProbe.efi; do
 done
 
 echo -e "${GREEN}Build completed:${NC}"
-echo -e "  ${GREEN}output/AllyTouchI2cDxe.efi${NC}  -> rEFInd drivers_x64/"
-echo -e "  ${GREEN}output/AllyTouchProbe.efi${NC}   -> run from the UEFI Shell"
+echo -e "  ${GREEN}output/TouchI2cDxe.efi${NC}  -> rEFInd drivers_x64/"
+echo -e "  ${GREEN}output/TouchProbe.efi${NC}   -> run from the UEFI Shell"
