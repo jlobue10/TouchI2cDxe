@@ -1,4 +1,9 @@
-# AllyTouchI2cDxe
+# TouchI2cDxe
+
+> Forked/generalized from [AllyTouchI2cDxe](https://github.com/jlobue10/AllyTouchI2cDxe)
+> (full history preserved). This repo is the device-generic home of the driver,
+> targeting additional handhelds such as the Steam Deck OLED alongside the
+> original ROG Xbox Ally X support.
 
 **Status: working — confirmed on ROG Xbox Ally X hardware (v1.0.0).**
 
