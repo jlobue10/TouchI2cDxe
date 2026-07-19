@@ -2,7 +2,9 @@
 #  TouchI2cDxe -- produces EFI_ABSOLUTE_POINTER_PROTOCOL for HID-over-I2C
 #  touchscreens on AMD FCH (DesignWare AMDI0010) handhelds, for use by rEFInd.
 #  Supported devices (see the profile table in TouchI2cDxe.c): ROG Xbox
-#  Ally X (Novatek NVTK0603), Steam Deck OLED (FocalTech FTS3528).
+#  Ally X (Novatek NVTK0603), Steam Deck OLED (FocalTech FTS3528),
+#  Steam Deck LCD (FocalTech FTS3528; distinguished from the OLED via the
+#  SMBIOS product name, since only the panel reset GPIO differs).
 #
 #  Walks the per-device profile table first (each device's DSDT-confirmed
 #  constants), with a controller base x slave address x HID descriptor
@@ -20,7 +22,7 @@
   BASE_NAME                      = TouchI2cDxe
   FILE_GUID                      = de5bc692-ccaf-41f1-9e37-e35242977a4c
   MODULE_TYPE                    = DXE_DRIVER
-  VERSION_STRING                 = 0.2
+  VERSION_STRING                 = 0.3
   ENTRY_POINT                    = TouchI2cDxeEntry
 
 [Sources]
@@ -47,6 +49,10 @@
   IoLib
   DebugLib
   PrintLib
+
+[Guids]
+  gEfiSmbiosTableGuid                        ## CONSUMES ## SystemTable
+  gEfiSmbios3TableGuid                       ## CONSUMES ## SystemTable
 
 [Protocols]
   gEfiAbsolutePointerProtocolGuid            ## PRODUCES

@@ -6,6 +6,7 @@
 
     - ASUS ROG Xbox Ally X      -- Novatek NVTK0603,  I2C0 @ 0xFEDC2000, addr 0x01
     - Steam Deck OLED (Galileo) -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
+    - Steam Deck LCD (Jupiter)  -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
 
     Layer 0  FCH AOAC power un-gating                 -- FchAoac.h + here
     Layer 1  DesignWare I2C master (MMIO, polled)     -- DwI2c.c
@@ -44,17 +45,29 @@
   back to a sweep of the candidate controller bases x slave addresses x
   descriptor registers.
 
+  The two Steam Deck models are indistinguishable on the I2C side (same
+  controller, slave address and descriptor register); only the panel reset
+  GPIO differs (85 on Galileo, 69 on Jupiter). A profile may therefore also
+  carry a DMI product name (SMBIOS Type 1), read once at entry: on a machine
+  whose product name is known, profiles naming a different product are
+  skipped, so a NAKing panel can never get the other model's GPIO toggled.
+  If SMBIOS is unreadable the DMI filter is simply not applied.
+
   A profile may carry a reset GPIO (FocalTech panels have an active-low
   RESET line, GPIO 85 on Galileo). If that profile's controller answers but
   the panel NAKs, the pin is driven/pulsed once and the normal 1 s retry
   loop provides the ~300 ms the panel needs from reset-release to first
   valid data (FocalTech application note timing).
 
-  Coordinate orientation: the Galileo panel and its touch matrix are native
-  portrait 800x1280 mounted right-side-up (the kernel applies the same
-  quirk, drm_panel_orientation_quirks.c lcd800x1280_rightside_up -- note
-  the Jupiter LCD is the opposite, left-side-up; confirmed on hardware:
-  the left-side-up transform mirrored both axes). rEFInd normally drives
+  Coordinate orientation: both Decks' panels and touch matrices are native
+  portrait 800x1280. Galileo is mounted right-side-up (the kernel applies
+  the same quirk, drm_panel_orientation_quirks.c lcd800x1280_rightside_up;
+  confirmed on Galileo hardware: the left-side-up transform mirrored both
+  axes). The kernel marks the Jupiter LCD panel left-side-up, but the same
+  right-side-up transform is assumed for its touch matrix too -- if touch
+  on Jupiter turns out 180 degrees off, a per-profile left-side-up
+  transform (screen X = YMax - rawY, screen Y = rawX) is the knob to
+  reach for. rEFInd normally drives
   the GOP in a landscape mode, where raw portrait coordinates land 90
   degrees off and only the screen center maps to itself. When the touch
   matrix is portrait but the current GOP mode is landscape, reports are
@@ -83,6 +96,8 @@
 #include <Library/DebugLib.h>
 #include <Library/IoLib.h>
 #include <Library/PrintLib.h>
+#include <IndustryStandard/SmBios.h>
+#include <Guid/SmBios.h>
 #include <Protocol/AbsolutePointer.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
@@ -116,8 +131,13 @@
 //     (DSDT I2CB.RSET calls SRAD(0x06)); active-low reset on GPIO 85
 //     (GpioIo output in TPNL._CRS; GpioInt 84 unused -- this driver polls).
 //
+//   Steam Deck LCD (Jupiter):  identical to Galileo (\_SB.I2CB @ 0xFEDC3000,
+//     FTS3528 slave 0x38, _DSM func 1 = 0x0000, AOAC device 6) except the
+//     panel reset line: GpioIo output GPIO 69 (GpioInt 68 unused).
+//
 typedef struct {
   CONST CHAR8  *Name;
+  CONST CHAR8  *DmiProduct;    // SMBIOS Type 1 product name; NULL = any
   UINT32       I2cBase;
   UINT8        SlaveAddr;
   UINT16       HidDescReg;
@@ -126,16 +146,19 @@ typedef struct {
 } TOUCH_PROFILE;
 
 STATIC CONST TOUCH_PROFILE  mProfiles[] = {
-  { "ROG Xbox Ally X (Novatek NVTK0603)",
+  { "ROG Xbox Ally X (Novatek NVTK0603)", NULL,
     DW_I2C_FCH_BASE_0, NVTK_I2C_ADDR, 0x0000, FCH_AOAC_DEV_I2C0, 0 },
-  { "Steam Deck OLED (FocalTech FTS3528)",
+  { "Steam Deck OLED (FocalTech FTS3528)", "Galileo",
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (85) },
+  { "Steam Deck LCD (FocalTech FTS3528)", "Jupiter",
+    DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
+    AMD_GPIO_REG (69) },
 };
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v8"
+#define TOUCH_DRIVER_VERSION  "v9"
 
 //
 // Poll every 10 ms (EFI timer units are 100 ns). At 400 kHz a full
@@ -198,6 +221,104 @@ STATIC CONST UINT8   mCandidateAddrs[]    = {
   NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
 };
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
+
+//
+// SMBIOS Type 1 product name, read once at entry ("" if SMBIOS is
+// unreadable). Distinguishes the two Steam Deck models, which share every
+// I2C-side constant and differ only in the panel reset GPIO.
+//
+STATIC CHAR8  mDmiProduct[32];
+
+// ---------------------------------------------------------------------------
+// DMI identity
+// ---------------------------------------------------------------------------
+
+/**
+  Fill mDmiProduct from the SMBIOS Type 1 (System Information) product name.
+  Walks the raw structure table from the configuration-table entry point
+  (3.0 64-bit preferred, legacy 32-bit fallback); best effort -- on any
+  malformed table mDmiProduct just stays empty and profile DMI filtering
+  is skipped.
+**/
+STATIC
+VOID
+TouchReadDmiProduct (
+  VOID
+  )
+{
+  UINT8  *Table;
+  UINTN  Size;
+  UINTN  i;
+  UINT8  *p;
+  UINT8  *End;
+
+  Table = NULL;
+  Size  = 0;
+  for (i = 0; i < gST->NumberOfTableEntries; i++) {
+    VOID  *Vt = gST->ConfigurationTable[i].VendorTable;
+
+    if (CompareGuid (&gST->ConfigurationTable[i].VendorGuid,
+                     &gEfiSmbios3TableGuid)) {
+      Table = (UINT8 *)(UINTN)((SMBIOS_TABLE_3_0_ENTRY_POINT *)Vt)->TableAddress;
+      Size  = ((SMBIOS_TABLE_3_0_ENTRY_POINT *)Vt)->TableMaximumSize;
+      break;                                   // 64-bit entry point wins
+    }
+    if ((Table == NULL) &&
+        CompareGuid (&gST->ConfigurationTable[i].VendorGuid,
+                     &gEfiSmbiosTableGuid)) {
+      Table = (UINT8 *)(UINTN)((SMBIOS_TABLE_ENTRY_POINT *)Vt)->TableAddress;
+      Size  = ((SMBIOS_TABLE_ENTRY_POINT *)Vt)->TableLength;
+    }
+  }
+  if ((Table == NULL) || (Size == 0)) {
+    return;
+  }
+
+  p   = Table;
+  End = Table + Size;
+  while ((p + sizeof (SMBIOS_STRUCTURE)) <= End) {
+    SMBIOS_STRUCTURE  *Hdr = (SMBIOS_STRUCTURE *)p;
+    UINT8             *Str = p + Hdr->Length;
+    UINT8             Want;
+    UINT8             n;
+
+    if ((Hdr->Type == SMBIOS_TYPE_END_OF_TABLE) ||
+        (Hdr->Length < sizeof (SMBIOS_STRUCTURE))) {
+      return;
+    }
+
+    Want = 0;
+    if ((Hdr->Type == SMBIOS_TYPE_SYSTEM_INFORMATION) &&
+        (Hdr->Length > OFFSET_OF (SMBIOS_TABLE_TYPE1, ProductName))) {
+      Want = ((SMBIOS_TABLE_TYPE1 *)p)->ProductName;
+    }
+
+    //
+    // String set: numbered NUL-terminated strings, terminated by an extra
+    // NUL (an empty set is just the two NULs).
+    //
+    n = 1;
+    while ((Str < End) && (*Str != 0)) {
+      UINTN  Len = 0;
+
+      while (((Str + Len) < End) && (Str[Len] != 0)) {
+        Len++;
+      }
+      if ((Want != 0) && (n == Want)) {
+        Len = MIN (Len, sizeof (mDmiProduct) - 1);
+        CopyMem (mDmiProduct, Str, Len);
+        mDmiProduct[Len] = '\0';
+        return;
+      }
+      Str += Len + 1;
+      n++;
+    }
+    if (Want != 0) {
+      return;                                  // Type 1 lacks that string
+    }
+    p = Str + 2;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Diagnostic log on the ESP (best effort; must never affect bring-up)
@@ -637,6 +758,16 @@ TouchDetect (
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     CONST TOUCH_PROFILE  *Prof = &mProfiles[p];
 
+    //
+    // DMI-gated profile on a machine known to be a different product: skip,
+    // so its reset GPIO (a different pin on every model) is never touched.
+    //
+    if ((Prof->DmiProduct != NULL) && (mDmiProduct[0] != '\0') &&
+        (AsciiStrCmp (Prof->DmiProduct, mDmiProduct) != 0)) {
+      ProfStatus[p] = EFI_UNSUPPORTED;
+      continue;
+    }
+
     Status = FchAoacPowerOnI2c (Prof->AoacDev, &Fresh);
     if (EFI_ERROR (Status)) {
       ProfStatus[p] = Status;
@@ -986,6 +1117,12 @@ TouchI2cDxeEntry (
   TouchLog (Dev, "==== TouchI2cDxe %a load %04d-%02d-%02d %02d:%02d:%02d ====",
             TOUCH_DRIVER_VERSION, Time.Year, Time.Month, Time.Day,
             Time.Hour, Time.Minute, Time.Second);
+
+  TouchReadDmiProduct ();
+  TouchLog (Dev, "DMI product: '%a'%a",
+            mDmiProduct,
+            (mDmiProduct[0] == '\0') ? " (SMBIOS unreadable; DMI profile "
+                                       "filter off)" : "");
 
   //
   // Census before we install anything: a nonzero count means the firmware's

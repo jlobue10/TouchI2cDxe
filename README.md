@@ -2,11 +2,13 @@
 
 > Forked/generalized from [AllyTouchI2cDxe](https://github.com/jlobue10/AllyTouchI2cDxe)
 > (full history preserved). This repo is the device-generic home of the driver,
-> targeting additional handhelds such as the Steam Deck OLED alongside the
+> targeting additional handhelds such as the Steam Decks alongside the
 > original ROG Xbox Ally X support.
 
-**Status: working on the ROG Xbox Ally X (since v1.0.0). Steam Deck OLED
-support is implemented and untested on hardware.**
+**Status: working on the ROG Xbox Ally X (since v1.0.0) and the Steam Deck
+OLED (since v1.1.0, confirmed on hardware including the portrait-to-landscape
+rotation). Steam Deck LCD support is implemented (v1.2.0) and untested on
+hardware.**
 
 A UEFI driver that makes the built-in **HID-over-I2C touchscreen** of AMD
 handhelds usable in the [rEFInd](https://www.rodsbooks.com/refind/)
@@ -20,7 +22,15 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 | Device | Panel | Controller | I2C addr | Notes |
 |---|---|---|---|---|
 | ASUS ROG Xbox Ally X | Novatek NVTK0603 | `AMDI0010` I2C0 @ `0xFEDC2000` | `0x01` | confirmed working |
-| Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | implemented, needs on-hardware confirmation |
+| Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
+| Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | implemented, needs on-hardware confirmation |
+
+The two Decks share every I2C-side constant and differ only in the panel
+reset GPIO (85 on Galileo, 69 on Jupiter), so those two profiles are gated
+on the SMBIOS product name (`Galileo` / `Jupiter`) — the driver never kicks
+the other model's GPIO. Both are assumed to want the same right-side-up
+portrait→landscape touch rotation (confirmed on Galileo; if Jupiter turns
+out 180° off, see the orientation notes in `src/TouchI2cDxe.c`).
 
 This is a sibling to the Xbox 360 controller driver: that one binds USB gamepads;
 this one binds the I2C-HID touch panel that a USB driver structurally cannot see.
@@ -66,9 +76,10 @@ bases (`0xFEDC2000`–`0xFEDC6000`) × slave addresses
 (`0x01`/`0x38`/`0x14`/`0x5D`) × `wHIDDescRegister` values
 (`0x0000`/`0x0001`/`0x0020`). Bring-up follows the Linux `i2c-hid` sequence:
 `SET_POWER(ON)`, `RESET`, drain the reset acknowledge (best effort). A profile
-may carry a panel reset GPIO (Galileo: GPIO 85, active low); if that profile's
-controller answers but the panel NAKs, the pin is kicked once and the retry
-loop re-probes after the panel's reset-to-ready time.
+may carry a panel reset GPIO (Galileo: GPIO 85, Jupiter: GPIO 69, active
+low); if that profile's controller answers but the panel NAKs, the pin is
+kicked once and the retry loop re-probes after the panel's reset-to-ready
+time.
 
 ## Installing
 
@@ -78,8 +89,10 @@ if you use that too) and reboot. No configuration is needed. On Secure Boot
 setups that enforce their own signatures (e.g. CachyOS with sbctl), sign the
 `.efi` like the other rEFInd binaries.
 
-[rEFInd_GUI](https://github.com/jlobue10/rEFInd_GUI) installs the Ally build
-of this driver automatically on ROG Xbox Ally / Ally X devices.
+[rEFInd_GUI](https://github.com/jlobue10/rEFInd_GUI) and
+[SteamDeck_rEFInd](https://github.com/jlobue10/SteamDeck_rEFInd) install this
+driver automatically on ROG Xbox Ally / Ally X and Steam Deck (LCD and OLED)
+devices.
 
 ### Troubleshooting
 
