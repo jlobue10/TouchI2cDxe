@@ -50,6 +50,19 @@
   loop provides the ~300 ms the panel needs from reset-release to first
   valid data (FocalTech application note timing).
 
+  Coordinate orientation: the Galileo panel and its touch matrix are native
+  portrait 800x1280 mounted right-side-up (the kernel applies the same
+  quirk, drm_panel_orientation_quirks.c lcd800x1280_rightside_up -- note
+  the Jupiter LCD is the opposite, left-side-up; confirmed on hardware:
+  the left-side-up transform mirrored both axes). rEFInd normally drives
+  the GOP in a landscape mode, where raw portrait coordinates land 90
+  degrees off and only the screen center maps to itself. When the touch
+  matrix is portrait but the current GOP mode is landscape, reports are
+  rotated (screen X = rawY, screen Y = XMax - rawX) and Mode->AbsoluteMax*
+  is published swapped. Re-checked on every report -- rEFInd can switch
+  video modes long after bring-up. Landscape-native panels (Ally X) and
+  portrait GOP modes pass through untouched.
+
   Every load appends a diagnostic record to \TouchI2c.log in the root of the
   volume the driver was loaded from (the ESP -- /boot/TouchI2c.log or
   /esp/TouchI2c.log from Linux): pre-existing AbsolutePointer handle count
@@ -71,6 +84,7 @@
 #include <Library/IoLib.h>
 #include <Library/PrintLib.h>
 #include <Protocol/AbsolutePointer.h>
+#include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
 
@@ -121,7 +135,7 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v6"
+#define TOUCH_DRIVER_VERSION  "v8"
 
 //
 // Poll every 10 ms (EFI timer units are 100 ns). At 400 kHz a full
@@ -157,7 +171,9 @@ typedef struct {
   BOOLEAN                         Verbose;        // Print() allowed (load time)
   BOOLEAN                         FirstTouchLogged;
   BOOLEAN                         ResetKicked[TOUCH_PROFILE_COUNT];
+  BOOLEAN                         RotateActive;   // portrait matrix on landscape GOP
   CONST TOUCH_PROFILE             *Profile;       // matched profile; may be NULL
+  EFI_GRAPHICS_OUTPUT_PROTOCOL    *Gop;           // cached for orientation checks
   UINT32                          I2cBase;
   UINT8                           SlaveAddr;
   I2C_HID_DESCRIPTOR              HidDesc;
@@ -324,6 +340,58 @@ FchAoacPowerOnI2c (
 // Layer 3: EFI_ABSOLUTE_POINTER_PROTOCOL
 // ---------------------------------------------------------------------------
 
+/**
+  Decide whether reports must be rotated into the framebuffer's frame and
+  publish the matching Mode->AbsoluteMax* ranges. Rotation is active when
+  the touch matrix is portrait (XMax < YMax) but the current GOP mode is
+  landscape -- the right-side-up panel case described in the file header.
+  Called on every report: two dereferences once the GOP is cached, and it
+  tracks rEFInd switching video modes after bring-up.
+**/
+STATIC
+VOID
+TouchUpdateOrientation (
+  IN TOUCH_DEV  *Dev
+  )
+{
+  BOOLEAN  Rotate;
+  UINT32   GopW;
+  UINT32   GopH;
+
+  Rotate = FALSE;
+  GopW   = 0;
+  GopH   = 0;
+
+  if (Dev->Layout.XLogicalMax < Dev->Layout.YLogicalMax) {
+    if (Dev->Gop == NULL) {
+      (VOID)gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL,
+                                 (VOID **)&Dev->Gop);
+    }
+    if ((Dev->Gop != NULL) && (Dev->Gop->Mode != NULL) &&
+        (Dev->Gop->Mode->Info != NULL)) {
+      GopW   = Dev->Gop->Mode->Info->HorizontalResolution;
+      GopH   = Dev->Gop->Mode->Info->VerticalResolution;
+      Rotate = (BOOLEAN)(GopW > GopH);
+    }
+  }
+
+  if (Rotate) {
+    Dev->Mode.AbsoluteMaxX = Dev->Layout.YLogicalMax;
+    Dev->Mode.AbsoluteMaxY = Dev->Layout.XLogicalMax;
+  } else {
+    Dev->Mode.AbsoluteMaxX = Dev->Layout.XLogicalMax;
+    Dev->Mode.AbsoluteMaxY = Dev->Layout.YLogicalMax;
+  }
+
+  if (Rotate != Dev->RotateActive) {
+    Dev->RotateActive = Rotate;
+    TouchLog (Dev, "orientation: %a (touch matrix %dx%d, GOP %dx%d)",
+              Rotate ? "rotating right-side-up portrait into landscape"
+                     : "pass-through",
+              Dev->Layout.XLogicalMax, Dev->Layout.YLogicalMax, GopW, GopH);
+  }
+}
+
 EFI_STATUS
 EFIAPI
 TouchReset (
@@ -404,6 +472,7 @@ TouchPoll (
   BOOLEAN     Tip;
   UINT32      X;
   UINT32      Y;
+  UINT32      Raw;
 
   if (!Dev->Ready) {
     return;
@@ -452,8 +521,22 @@ TouchPoll (
 
   if (!Dev->FirstTouchLogged && Tip) {
     Dev->FirstTouchLogged = TRUE;
-    TouchLog (Dev, "first touch report: x=%d y=%d (input path live)",
+    TouchLog (Dev, "first touch report: raw x=%d y=%d (input path live)",
               (UINT32)X, (UINT32)Y);
+  }
+
+  //
+  // Rotate the raw portrait matrix onto a landscape framebuffer (see
+  // TouchUpdateOrientation). Right-side-up mounting puts the panel's
+  // origin at the screen's bottom-left, so screen X = rawY, screen
+  // Y = XMax - rawX. Clamp first: a spurious report beyond the logical
+  // range must not underflow.
+  //
+  TouchUpdateOrientation (Dev);
+  if (Dev->RotateActive) {
+    Raw = MIN (X, Dev->Layout.XLogicalMax);
+    X   = MIN (Y, Dev->Layout.YLogicalMax);
+    Y   = Dev->Layout.XLogicalMax - Raw;
   }
 
   if (Tip || Dev->LastTip) {
@@ -799,12 +882,13 @@ TouchTryBringUp (
   AckSeen = TouchBringUp (Dev);
 
   //
-  // Publish the real coordinate ranges behind the installed protocol, then
-  // open the input path. rEFInd reads Mode->AbsoluteMax* on every event, so
-  // updating in place is enough even after its one-time pdInitialize().
+  // Publish the real coordinate ranges (swapped if the portrait matrix must
+  // be rotated onto a landscape GOP mode) behind the installed protocol,
+  // then open the input path. rEFInd reads Mode->AbsoluteMax* on every
+  // event, so updating in place is enough even after its one-time
+  // pdInitialize().
   //
-  Dev->Mode.AbsoluteMaxX = Dev->Layout.XLogicalMax;
-  Dev->Mode.AbsoluteMaxY = Dev->Layout.YLogicalMax;
+  TouchUpdateOrientation (Dev);
 
   Dev->Ready = TRUE;
   Status = gBS->SetTimer (Dev->PollEvent, TimerPeriodic, TOUCH_POLL_PERIOD);
@@ -813,10 +897,12 @@ TouchTryBringUp (
     goto Fail;
   }
 
-  TouchLog (Dev, "attempt %d: READY (reset ack %a, report id %d, range %dx%d)",
+  TouchLog (Dev, "attempt %d: READY (reset ack %a, report id %d, range %dx%d, "
+            "rotation %a)",
             (UINT32)Dev->AttemptCount, AckSeen ? "seen" : "not seen",
             Dev->Layout.HasReportId ? Dev->Layout.ReportId : 0,
-            Dev->Layout.XLogicalMax, Dev->Layout.YLogicalMax);
+            Dev->Layout.XLogicalMax, Dev->Layout.YLogicalMax,
+            Dev->RotateActive ? "on" : "off");
   if (Dev->Verbose) {
     Print (L"TouchI2cDxe: touch input live (%ux%u).\n",
            (UINT32)Dev->Mode.AbsoluteMaxX, (UINT32)Dev->Mode.AbsoluteMaxY);

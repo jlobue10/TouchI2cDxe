@@ -50,6 +50,7 @@
 
 [Protocols]
   gEfiAbsolutePointerProtocolGuid            ## PRODUCES
+  gEfiGraphicsOutputProtocolGuid             ## CONSUMES
   gEfiLoadedImageProtocolGuid                ## CONSUMES
   gEfiSimpleFileSystemProtocolGuid           ## CONSUMES
 
