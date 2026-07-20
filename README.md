@@ -5,10 +5,9 @@
 > targeting additional handhelds such as the Steam Decks alongside the
 > original ROG Xbox Ally X support.
 
-**Status: working on the ROG Xbox Ally X (since v1.0.0) and the Steam Deck
-OLED (since v1.1.0, confirmed on hardware including the portrait-to-landscape
-rotation). Steam Deck LCD support is implemented (v1.2.0) and untested on
-hardware.**
+**Status: working on the ROG Xbox Ally X (since v1.0.0), the Steam Deck
+OLED (since v1.1.0) and the Steam Deck LCD (since v1.2.0) — all confirmed on
+hardware, including the portrait-to-landscape rotation on both Decks.**
 
 A UEFI driver that makes the built-in **HID-over-I2C touchscreen** of AMD
 handhelds usable in the [rEFInd](https://www.rodsbooks.com/refind/)
@@ -23,14 +22,13 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 |---|---|---|---|---|
 | ASUS ROG Xbox Ally X | Novatek NVTK0603 | `AMDI0010` I2C0 @ `0xFEDC2000` | `0x01` | confirmed working |
 | Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
-| Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | implemented, needs on-hardware confirmation |
+| Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 
 The two Decks share every I2C-side constant and differ only in the panel
 reset GPIO (85 on Galileo, 69 on Jupiter), so those two profiles are gated
 on the SMBIOS product name (`Galileo` / `Jupiter`) — the driver never kicks
-the other model's GPIO. Both are assumed to want the same right-side-up
-portrait→landscape touch rotation (confirmed on Galileo; if Jupiter turns
-out 180° off, see the orientation notes in `src/TouchI2cDxe.c`).
+the other model's GPIO. Both use the same right-side-up portrait→landscape
+touch rotation, confirmed on hardware on both models.
 
 This is a sibling to the Xbox 360 controller driver: that one binds USB gamepads;
 this one binds the I2C-HID touch panel that a USB driver structurally cannot see.

@@ -60,14 +60,13 @@
   valid data (FocalTech application note timing).
 
   Coordinate orientation: both Decks' panels and touch matrices are native
-  portrait 800x1280. Galileo is mounted right-side-up (the kernel applies
-  the same quirk, drm_panel_orientation_quirks.c lcd800x1280_rightside_up;
-  confirmed on Galileo hardware: the left-side-up transform mirrored both
-  axes). The kernel marks the Jupiter LCD panel left-side-up, but the same
-  right-side-up transform is assumed for its touch matrix too -- if touch
-  on Jupiter turns out 180 degrees off, a per-profile left-side-up
-  transform (screen X = YMax - rawY, screen Y = rawX) is the knob to
-  reach for. rEFInd normally drives
+  portrait 800x1280, and both use the same right-side-up transform below --
+  confirmed on hardware on both models (2026-07-19/20). On Galileo the
+  kernel applies the matching panel quirk
+  (drm_panel_orientation_quirks.c lcd800x1280_rightside_up; the
+  left-side-up transform mirrored both axes when tried). Note the kernel
+  marks the Jupiter LCD *panel* left-side-up, but its *touch matrix* is
+  right-side-up all the same. rEFInd normally drives
   the GOP in a landscape mode, where raw portrait coordinates land 90
   degrees off and only the screen center maps to itself. When the touch
   matrix is portrait but the current GOP mode is landscape, reports are
