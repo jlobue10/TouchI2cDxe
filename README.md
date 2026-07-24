@@ -23,12 +23,17 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 | ASUS ROG Xbox Ally X | Novatek NVTK0603 | `AMDI0010` I2C0 @ `0xFEDC2000` | `0x01` | confirmed working |
 | Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
+| ASUS ROG Ally 2023 (`RC71L`) | Goodix GT7868Q expected | sweep | sweep | untested sweep profile |
+| ASUS ROG Ally X 2024 (`RC72LA`) | unknown | sweep | sweep | untested sweep profile |
+| Lenovo Legion Go (`83E1`) | unknown | sweep | sweep | untested sweep profile; Legion Go 2 pending DMI confirmation |
 
 The two Decks share every I2C-side constant and differ only in the panel
 reset GPIO (85 on Galileo, 69 on Jupiter), so those two profiles are gated
 on the SMBIOS product name (`Galileo` / `Jupiter`) — the driver never kicks
-the other model's GPIO. Both use the same right-side-up portrait→landscape
-touch rotation, confirmed on hardware on both models.
+the other model's GPIO. The Ally profile is similarly gated by its SMBIOS
+baseboard (`RC73XA` / `RC73YA`). Missing or unknown identity fails closed
+before fixed MMIO, AOAC, or GPIO access. Both Decks use the same
+right-side-up portrait→landscape touch rotation, confirmed on hardware.
 
 This is a sibling to the Xbox 360 controller driver: that one binds USB gamepads;
 this one binds the I2C-HID touch panel that a USB driver structurally cannot see.
@@ -67,12 +72,17 @@ lessons are baked in:
   registers (the same thing ACPI `_PS0` does) and programs 400 kHz timing —
   on a normal boot the firmware leaves the tile power-gated.
 
-Detection walks the per-device profile table first (each profile's
+Detection requires a positively matching SMBIOS profile and starts with its
 DSDT-confirmed controller base, slave address, `wHIDDescRegister` and AOAC
-power-gate index), then falls back to a sweep of the candidate FCH controller
-bases (`0xFEDC2000`–`0xFEDC6000`) × slave addresses
-(`0x01`/`0x38`/`0x14`/`0x5D`) × `wHIDDescRegister` values
-(`0x0000`/`0x0001`/`0x0020`). Bring-up follows the Linux `i2c-hid` sequence:
+power-gate index. A fallback may try the other known panel addresses
+(`0x01`/`0x38`/`0x14`/`0x5D`) and `wHIDDescRegister` values
+(`0x0000`/`0x0001`/`0x0020`), but only on that identified profile's
+controller. Identified AMD handhelds without DSDT-confirmed constants —
+ROG Ally 2023 (`RC71L`), ROG Ally X 2024 (`RC72LA`), Lenovo Legion Go
+(`83E1`) — are *sweep profiles*: the fallback additionally tries the fixed
+FCH controller bases (`0xFEDC2000`–`0xFEDC6000`) on them, and only on them.
+Truly unknown hardware is never probed. Bring-up follows the Linux
+`i2c-hid` sequence:
 `SET_POWER(ON)`, `RESET`, drain the reset acknowledge (best effort). A profile
 may carry a panel reset GPIO (Galileo: GPIO 85, Jupiter: GPIO 69, active
 low); if that profile's controller answers but the panel NAKs, the pin is

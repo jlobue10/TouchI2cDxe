@@ -6,12 +6,13 @@
 #  Steam Deck LCD (FocalTech FTS3528; distinguished from the OLED via the
 #  SMBIOS product name, since only the panel reset GPIO differs).
 #
-#  Walks the per-device profile table first (each device's DSDT-confirmed
-#  constants), with a controller base x slave address x HID descriptor
-#  register sweep as fallback. Powers on the gated I2C controller tile
-#  itself (FCH AOAC), can kick a panel reset GPIO, and retries bring-up in
-#  the background; the entry point never fails, so a missing/unpowered panel
-#  cannot break the boot manager.
+#  Requires a matching SMBIOS product/baseboard profile, then uses that
+#  device's DSDT-confirmed controller and tries known panel addresses and HID
+#  descriptor registers on that controller only; identified devices without
+#  DSDT-confirmed constants (sweep profiles) get a bounded FCH base sweep
+#  instead. Powers on the gated I2C tile itself (FCH AOAC), can kick a panel
+#  reset GPIO, and retries bring-up in the background; the entry point never
+#  fails, so a missing/unpowered panel cannot break the boot manager.
 #
 #  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
 #  SPDX-License-Identifier: BSD-2-Clause-Patent

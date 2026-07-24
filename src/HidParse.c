@@ -94,6 +94,7 @@ EFI_STATUS
 HidParseTouchLayout (
   IN  CONST UINT8       *Desc,
   IN  UINTN             DescLen,
+  IN  UINTN             MaxInputLength,
   OUT HID_TOUCH_LAYOUT  *Layout
   )
 {
@@ -113,10 +114,14 @@ HidParseTouchLayout (
 
   UINTN        i = 0;
   UINTN        k;
+  UINT32       MaxReportBits;
 
-  if ((Desc == NULL) || (Layout == NULL) || (DescLen == 0)) {
+  if ((Desc == NULL) || (Layout == NULL) || (DescLen == 0) ||
+      (MaxInputLength < 3) ||
+      ((MaxInputLength - 2) > (MAX_UINT32 / 8))) {
     return EFI_INVALID_PARAMETER;
   }
+  MaxReportBits = (UINT32)(MaxInputLength - 2) * 8;
 
   SetMem (&G, sizeof (G), 0);
   SetMem (Rids, sizeof (Rids), 0);
@@ -202,6 +207,22 @@ HidParseTouchLayout (
         RID_STATE  *R = GetRidState (Rids, ReportId);
 
         if (R != NULL) {
+          UINT32  ItemBits;
+
+          //
+          // ReportSize/ReportCount are supplied by the device. Bound both the
+          // loop and the multiplication by the maximum input report declared
+          // in the already-validated I2C HID descriptor.
+          //
+          if ((G.ReportSize == 0) || (G.ReportCount == 0) ||
+              (G.ReportSize > MaxReportBits) ||
+              (G.ReportCount > (MaxReportBits / G.ReportSize))) {
+            return EFI_COMPROMISED_DATA;
+          }
+          ItemBits = G.ReportSize * G.ReportCount;
+          if (R->BitPos > (MaxReportBits - ItemBits)) {
+            return EFI_COMPROMISED_DATA;
+          }
           for (k = 0; k < G.ReportCount; k++) {
             UINT32  Usage;
             UINT32  Off = R->BitPos + (UINT32)k * G.ReportSize;
@@ -229,7 +250,7 @@ HidParseTouchLayout (
               R->YMax  = ResolveLogicalMax (&G);
             }
           }
-          R->BitPos += G.ReportSize * G.ReportCount;
+          R->BitPos += ItemBits;
         }
       }
       // Any main item (Input/Output/Feature/Collection/End) clears locals.
@@ -242,8 +263,17 @@ HidParseTouchLayout (
   }
 
   for (k = 0; k < MAX_REPORT_IDS; k++) {
+    UINT32  PayloadBits;
+
+    PayloadBits = MaxReportBits - (AnyReportId ? 8 : 0);
     if (Rids[k].Used && (Rids[k].TipOff >= 0) &&
-        (Rids[k].XOff >= 0) && (Rids[k].YOff >= 0)) {
+        (Rids[k].XOff >= 0) && (Rids[k].YOff >= 0) &&
+        (Rids[k].BitPos <= PayloadBits) &&
+        ((UINT32)Rids[k].TipOff < PayloadBits) &&
+        (Rids[k].XBits <= PayloadBits) &&
+        (Rids[k].YBits <= PayloadBits) &&
+        ((UINT32)Rids[k].XOff <= PayloadBits - Rids[k].XBits) &&
+        ((UINT32)Rids[k].YOff <= PayloadBits - Rids[k].YBits)) {
       Layout->HasReportId  = AnyReportId;
       Layout->ReportId     = Rids[k].Id;
       Layout->TipBitOffset = (UINT32)Rids[k].TipOff;

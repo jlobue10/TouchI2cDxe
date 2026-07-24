@@ -177,7 +177,9 @@ DwI2cXfer (
   UINT32  Cmd;
   UINT32  IcStatus;
 
-  if ((WLen == 0) && (RLen == 0)) {
+  if (((WLen == 0) && (RLen == 0)) ||
+      ((WLen > 0) && (WBuf == NULL)) ||
+      ((RLen > 0) && (RBuf == NULL))) {
     return EFI_INVALID_PARAMETER;
   }
 
