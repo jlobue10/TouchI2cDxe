@@ -184,7 +184,7 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v9"
+#define TOUCH_DRIVER_VERSION  "v10"
 
 //
 // Poll no faster than every 10 ms (EFI timer units are 100 ns). The final
