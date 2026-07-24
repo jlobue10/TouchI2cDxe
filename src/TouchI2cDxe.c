@@ -40,18 +40,18 @@
        If the tile was freshly powered (firmware never programmed it), the
        full 400 kHz timing is programmed rather than inherited.
 
-  Detection walks the profile table first (each profile's DSDT-confirmed
-  controller base, slave address and HID descriptor register), then falls
-  back to a sweep of the candidate controller bases x slave addresses x
-  descriptor registers.
+  Detection first requires a matching SMBIOS product/baseboard profile. It
+  tries that profile's DSDT-confirmed controller base, slave address and HID
+  descriptor register, then tries alternate addresses/registers on that same
+  controller only. Unknown hardware is never probed through fixed MMIO bases.
 
   The two Steam Deck models are indistinguishable on the I2C side (same
   controller, slave address and descriptor register); only the panel reset
   GPIO differs (85 on Galileo, 69 on Jupiter). A profile may therefore also
   carry a DMI product name (SMBIOS Type 1), read once at entry: on a machine
-  whose product name is known, profiles naming a different product are
-  skipped, so a NAKing panel can never get the other model's GPIO toggled.
-  If SMBIOS is unreadable the DMI filter is simply not applied.
+  whose product or baseboard identity does not match is skipped, so a NAKing
+  panel can never get another model's GPIO toggled. If SMBIOS is unreadable,
+  probing fails closed without changing AOAC or GPIO state.
 
   A profile may carry a reset GPIO (FocalTech panels have an active-low
   RESET line, GPIO 85 on Galileo). If that profile's controller answers but
@@ -136,7 +136,9 @@
 //
 typedef struct {
   CONST CHAR8  *Name;
-  CONST CHAR8  *DmiProduct;    // SMBIOS Type 1 product name; NULL = any
+  CONST CHAR8  *DmiProduct;    // exact SMBIOS Type 1 product name
+  CONST CHAR8  *DmiBoardA;     // accepted SMBIOS Type 2 product names
+  CONST CHAR8  *DmiBoardB;
   UINT32       I2cBase;
   UINT8        SlaveAddr;
   UINT16       HidDescReg;
@@ -145,12 +147,12 @@ typedef struct {
 } TOUCH_PROFILE;
 
 STATIC CONST TOUCH_PROFILE  mProfiles[] = {
-  { "ROG Xbox Ally X (Novatek NVTK0603)", NULL,
+  { "ROG Xbox Ally X (Novatek NVTK0603)", NULL, "RC73XA", "RC73YA",
     DW_I2C_FCH_BASE_0, NVTK_I2C_ADDR, 0x0000, FCH_AOAC_DEV_I2C0, 0 },
-  { "Steam Deck OLED (FocalTech FTS3528)", "Galileo",
+  { "Steam Deck OLED (FocalTech FTS3528)", "Galileo", NULL, NULL,
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (85) },
-  { "Steam Deck LCD (FocalTech FTS3528)", "Jupiter",
+  { "Steam Deck LCD (FocalTech FTS3528)", "Jupiter", NULL, NULL,
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (69) },
 };
@@ -160,9 +162,9 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 #define TOUCH_DRIVER_VERSION  "v9"
 
 //
-// Poll every 10 ms (EFI timer units are 100 ns). At 400 kHz a full
-// wMaxInputLength read takes well under 2 ms; 100 Hz polling keeps menu
-// tracking snappy.
+// Poll no faster than every 10 ms (EFI timer units are 100 ns). The final
+// interval is also bounded by the advertised maximum input length so a
+// malformed descriptor cannot create overlapping transactions.
 //
 #define TOUCH_POLL_PERIOD      100000
 
@@ -212,36 +214,78 @@ typedef struct {
 #define TOUCH_SIG  SIGNATURE_64 ('T','c','h','I','2','c','D','x')
 #define TOUCH_FROM_ABS(a) BASE_CR (a, TOUCH_DEV, AbsolutePointer)
 
-STATIC CONST UINT32  mCandidateBases[] = {
-  DW_I2C_FCH_BASE_0, DW_I2C_FCH_BASE_1, DW_I2C_FCH_BASE_2,
-  DW_I2C_FCH_BASE_3, DW_I2C_FCH_BASE_4
-};
 STATIC CONST UINT8   mCandidateAddrs[]    = {
   NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
 };
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
 
 //
-// SMBIOS Type 1 product name, read once at entry ("" if SMBIOS is
-// unreadable). Distinguishes the two Steam Deck models, which share every
-// I2C-side constant and differ only in the panel reset GPIO.
+// SMBIOS system and baseboard product names, read once at entry ("" when
+// unreadable). They gate all MMIO/AOAC/GPIO probing.
 //
 STATIC CHAR8  mDmiProduct[32];
+STATIC CHAR8  mDmiBoard[32];
 
 // ---------------------------------------------------------------------------
 // DMI identity
 // ---------------------------------------------------------------------------
 
 /**
-  Fill mDmiProduct from the SMBIOS Type 1 (System Information) product name.
-  Walks the raw structure table from the configuration-table entry point
-  (3.0 64-bit preferred, legacy 32-bit fallback); best effort -- on any
-  malformed table mDmiProduct just stays empty and profile DMI filtering
-  is skipped.
+  Copy one numbered string from an SMBIOS structure's trailing string set.
 **/
 STATIC
 VOID
-TouchReadDmiProduct (
+TouchCopySmbiosString (
+  IN  UINT8  *Structure,
+  IN  UINT8  *End,
+  IN  UINT8  StringNumber,
+  OUT CHAR8  *Destination,
+  IN  UINTN  DestinationSize
+  )
+{
+  SMBIOS_STRUCTURE  *Hdr;
+  UINT8             *Str;
+  UINT8             Number;
+
+  if ((StringNumber == 0) || (DestinationSize == 0)) {
+    return;
+  }
+  Hdr = (SMBIOS_STRUCTURE *)Structure;
+  if ((Structure + Hdr->Length) > End) {
+    return;
+  }
+  Str    = Structure + Hdr->Length;
+  Number = 1;
+  while ((Str < End) && (*Str != 0)) {
+    UINTN  Len;
+
+    Len = 0;
+    while (((Str + Len) < End) && (Str[Len] != 0)) {
+      Len++;
+    }
+    if (Number == StringNumber) {
+      Len = MIN (Len, DestinationSize - 1);
+      CopyMem (Destination, Str, Len);
+      Destination[Len] = '\0';
+      return;
+    }
+    if ((Str + Len) >= End) {
+      return;
+    }
+    Str += Len + 1;
+    Number++;
+  }
+}
+
+/**
+  Fill mDmiProduct and mDmiBoard from SMBIOS Types 1 and 2.
+  Walks the raw structure table from the configuration-table entry point
+  (3.0 64-bit preferred, legacy 32-bit fallback). On malformed or unavailable
+  data the identity stays empty and hardware probing is disabled.
+**/
+STATIC
+VOID
+TouchReadDmiIdentity (
   VOID
   )
 {
@@ -278,45 +322,60 @@ TouchReadDmiProduct (
   while ((p + sizeof (SMBIOS_STRUCTURE)) <= End) {
     SMBIOS_STRUCTURE  *Hdr = (SMBIOS_STRUCTURE *)p;
     UINT8             *Str = p + Hdr->Length;
-    UINT8             Want;
-    UINT8             n;
-
     if ((Hdr->Type == SMBIOS_TYPE_END_OF_TABLE) ||
-        (Hdr->Length < sizeof (SMBIOS_STRUCTURE))) {
+        (Hdr->Length < sizeof (SMBIOS_STRUCTURE)) ||
+        ((p + Hdr->Length) > End)) {
       return;
     }
 
-    Want = 0;
     if ((Hdr->Type == SMBIOS_TYPE_SYSTEM_INFORMATION) &&
         (Hdr->Length > OFFSET_OF (SMBIOS_TABLE_TYPE1, ProductName))) {
-      Want = ((SMBIOS_TABLE_TYPE1 *)p)->ProductName;
+      TouchCopySmbiosString (
+        p, End, ((SMBIOS_TABLE_TYPE1 *)p)->ProductName,
+        mDmiProduct, sizeof (mDmiProduct)
+        );
+    } else if ((Hdr->Type == SMBIOS_TYPE_BASEBOARD_INFORMATION) &&
+               (Hdr->Length > OFFSET_OF (SMBIOS_TABLE_TYPE2, ProductName))) {
+      TouchCopySmbiosString (
+        p, End, ((SMBIOS_TABLE_TYPE2 *)p)->ProductName,
+        mDmiBoard, sizeof (mDmiBoard)
+        );
     }
 
     //
-    // String set: numbered NUL-terminated strings, terminated by an extra
-    // NUL (an empty set is just the two NULs).
+    // Advance past the formatted structure and its double-NUL-terminated
+    // string set.
     //
-    n = 1;
-    while ((Str < End) && (*Str != 0)) {
-      UINTN  Len = 0;
-
-      while (((Str + Len) < End) && (Str[Len] != 0)) {
-        Len++;
-      }
-      if ((Want != 0) && (n == Want)) {
-        Len = MIN (Len, sizeof (mDmiProduct) - 1);
-        CopyMem (mDmiProduct, Str, Len);
-        mDmiProduct[Len] = '\0';
-        return;
-      }
-      Str += Len + 1;
-      n++;
+    while (((Str + 1) < End) && !((Str[0] == 0) && (Str[1] == 0))) {
+      Str++;
     }
-    if (Want != 0) {
-      return;                                  // Type 1 lacks that string
+    if ((Str + 1) >= End) {
+      return;
     }
     p = Str + 2;
+    if ((mDmiProduct[0] != '\0') && (mDmiBoard[0] != '\0')) {
+      return;
+    }
   }
+}
+
+STATIC
+BOOLEAN
+TouchProfileMatchesIdentity (
+  IN CONST TOUCH_PROFILE  *Profile
+  )
+{
+  if (Profile->DmiProduct != NULL) {
+    return (BOOLEAN)((mDmiProduct[0] != '\0') &&
+                     (AsciiStrCmp (Profile->DmiProduct, mDmiProduct) == 0));
+  }
+  return (BOOLEAN)((mDmiBoard[0] != '\0') &&
+                   (((Profile->DmiBoardA != NULL) &&
+                     (AsciiStrnCmp (Profile->DmiBoardA, mDmiBoard,
+                                    AsciiStrLen (Profile->DmiBoardA)) == 0)) ||
+                    ((Profile->DmiBoardB != NULL) &&
+                     (AsciiStrnCmp (Profile->DmiBoardB, mDmiBoard,
+                                    AsciiStrLen (Profile->DmiBoardB)) == 0))));
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +697,8 @@ TouchPoll (
                         Dev->Layout.XBitOffset, Dev->Layout.XBitSize);
   Y   = HidExtractBits (Payload, PayloadLen,
                         Dev->Layout.YBitOffset, Dev->Layout.YBitSize);
+  X   = MIN (X, Dev->Layout.XLogicalMax);
+  Y   = MIN (Y, Dev->Layout.YLogicalMax);
 
   if (!Dev->FirstTouchLogged && Tip) {
     Dev->FirstTouchLogged = TRUE;
@@ -654,8 +715,8 @@ TouchPoll (
   //
   TouchUpdateOrientation (Dev);
   if (Dev->RotateActive) {
-    Raw = MIN (X, Dev->Layout.XLogicalMax);
-    X   = MIN (Y, Dev->Layout.YLogicalMax);
+    Raw = X;
+    X   = Y;
     Y   = Dev->Layout.XLogicalMax - Raw;
   }
 
@@ -685,7 +746,12 @@ TouchExitBootServices (
 {
   TOUCH_DEV  *Dev = (TOUCH_DEV *)Context;
 
-  gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
+  if (Dev->PollEvent != NULL) {
+    gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
+  }
+  if (Dev->RetryEvent != NULL) {
+    gBS->SetTimer (Dev->RetryEvent, TimerCancel, 0);
+  }
   if (Dev->Ready) {
     DwI2cDisable (Dev->I2cBase);  // leave the bus idle for the OS driver
   }
@@ -727,11 +793,11 @@ TouchResetKick (
 }
 
 /**
-  Find the panel: walk the profile table (un-gating each profile's I2C tile
-  and trying its DSDT-confirmed constants), then sweep controllers x
-  addresses x descriptor registers. On success Dev->I2cBase / Dev->SlaveAddr
-  / Dev->HidDesc / Dev->Profile are filled and the controller is initialized
-  and targeting the panel.
+  Find the panel: walk positively identified profiles (un-gating only their
+  I2C tile and trying the DSDT-confirmed constants), then sweep alternate
+  addresses and descriptor registers on those same controllers. On success
+  Dev->I2cBase / Dev->SlaveAddr / Dev->HidDesc / Dev->Profile are filled and
+  the controller is initialized and targeting the panel.
 
   @param[out] ProfStatus  Per-profile probe result (TOUCH_PROFILE_COUNT
                           entries), for diagnostics.
@@ -745,10 +811,10 @@ TouchDetect (
 {
   EFI_STATUS  Status;
   BOOLEAN     Fresh;
-  BOOLEAN     FreshByTile[4];
-  UINTN       p, b, a, r;
+  BOOLEAN     IdentityMatched;
+  UINTN       p, a, r;
 
-  ZeroMem (FreshByTile, sizeof (FreshByTile));
+  IdentityMatched = FALSE;
 
   //
   // Profile pass: each profile's own tile, base, address, descriptor
@@ -758,26 +824,20 @@ TouchDetect (
     CONST TOUCH_PROFILE  *Prof = &mProfiles[p];
 
     //
-    // DMI-gated profile on a machine known to be a different product: skip,
-    // so its reset GPIO (a different pin on every model) is never touched.
+    // Fail closed unless SMBIOS positively identifies this profile. This keeps
+    // fixed AOAC/MMIO/GPIO writes off unknown hardware.
     //
-    if ((Prof->DmiProduct != NULL) && (mDmiProduct[0] != '\0') &&
-        (AsciiStrCmp (Prof->DmiProduct, mDmiProduct) != 0)) {
+    if (!TouchProfileMatchesIdentity (Prof)) {
       ProfStatus[p] = EFI_UNSUPPORTED;
       continue;
     }
+    IdentityMatched = TRUE;
 
     Status = FchAoacPowerOnI2c (Prof->AoacDev, &Fresh);
     if (EFI_ERROR (Status)) {
       ProfStatus[p] = Status;
       continue;
     }
-    if (Fresh &&
-        (Prof->AoacDev >= FCH_AOAC_DEV_I2C0) &&
-        (Prof->AoacDev <= FCH_AOAC_DEV_I2C3)) {
-      FreshByTile[Prof->AoacDev - FCH_AOAC_DEV_I2C0] = TRUE;
-    }
-
     if (!DwI2cControllerPresent (Prof->I2cBase)) {
       ProfStatus[p] = EFI_NO_MAPPING;            // COMP_TYPE mismatch
       continue;
@@ -808,41 +868,37 @@ TouchDetect (
     }
   }
 
-  //
-  // Fallback sweep for panel/board variants. Un-gate all four fixed-base
-  // tiles so the COMP_TYPE probe sees them; DW_I2C_FCH_BASE_4 has no known
-  // AOAC index and is probed only if already powered.
-  //
-  for (b = 0; b < 4; b++) {
-    if (!EFI_ERROR (FchAoacPowerOnI2c ((UINT8)(FCH_AOAC_DEV_I2C0 + b), &Fresh))
-        && Fresh) {
-      FreshByTile[b] = TRUE;
-    }
+  if (!IdentityMatched) {
+    return EFI_UNSUPPORTED;
   }
 
-  for (b = 0; b < ARRAY_SIZE (mCandidateBases); b++) {
-    BOOLEAN  TileFresh;
+  //
+  // Fallback sweep for panel variants. Keep it on controllers belonging to a
+  // positively identified profile; never enumerate fixed MMIO bases globally.
+  //
+  for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+    CONST TOUCH_PROFILE  *Prof;
 
-    if (!DwI2cControllerPresent (mCandidateBases[b])) {
+    Prof = &mProfiles[p];
+    if (!TouchProfileMatchesIdentity (Prof) ||
+        !DwI2cControllerPresent (Prof->I2cBase)) {
       continue;
     }
-    TileFresh = (b < 4) ? FreshByTile[b] : FALSE;
     for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
-      if (EFI_ERROR (DwI2cInit (mCandidateBases[b], mCandidateAddrs[a],
-                                TileFresh))) {
+      if (EFI_ERROR (DwI2cInit (Prof->I2cBase, mCandidateAddrs[a], FALSE))) {
         continue;
       }
       for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
-        if (!EFI_ERROR (I2cHidReadDescriptor (mCandidateBases[b],
+        if (!EFI_ERROR (I2cHidReadDescriptor (Prof->I2cBase,
                                               mCandidateDescRegs[r],
                                               &Dev->HidDesc))) {
-          Dev->I2cBase   = mCandidateBases[b];
+          Dev->I2cBase   = Prof->I2cBase;
           Dev->SlaveAddr = mCandidateAddrs[a];
-          Dev->Profile   = NULL;                 // found by sweep
+          Dev->Profile   = Prof;
           return EFI_SUCCESS;
         }
       }
-      DwI2cDisable (mCandidateBases[b]);
+      DwI2cDisable (Prof->I2cBase);
     }
   }
   return EFI_NOT_FOUND;
@@ -899,6 +955,7 @@ TouchTryBringUp (
   UINT8       *ReportDesc;
   BOOLEAN     AckSeen;
   BOOLEAN     LogAttempt;
+  UINT64      PollPeriod;
   UINTN       p;
 
   ReportDesc = NULL;
@@ -945,7 +1002,7 @@ TouchTryBringUp (
   TouchLog (Dev, "attempt %d: panel at base 0x%08x addr 0x%02x (%a), "
             "VID 0x%04x PID 0x%04x, reportdesc %d bytes, maxinput %d",
             (UINT32)Dev->AttemptCount, Dev->I2cBase, Dev->SlaveAddr,
-            (Dev->Profile != NULL) ? Dev->Profile->Name : "fallback sweep",
+            (Dev->Profile != NULL) ? Dev->Profile->Name : "identified profile",
             Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID,
             Dev->HidDesc.wReportDescLength, Dev->HidDesc.wMaxInputLength);
   if (Dev->Verbose) {
@@ -973,7 +1030,7 @@ TouchTryBringUp (
   //
   // GT7868Q descriptor fixup carried over from ty2/goodix-gt7868q-linux-driver:
   // byte 607 is a Logical Minimum tag that should be Logical Maximum. Only
-  // relevant if the sweep found a Goodix panel (other Ally-family boards).
+  // relevant if an identified profile variant exposes a Goodix panel.
   //
   if ((Dev->HidDesc.wVendorID == 0x27C6) &&
       (Dev->HidDesc.wReportDescLength > 608) && (ReportDesc[607] == 0x15)) {
@@ -981,7 +1038,7 @@ TouchTryBringUp (
   }
 
   Status = HidParseTouchLayout (ReportDesc, Dev->HidDesc.wReportDescLength,
-                                &Dev->Layout);
+                                Dev->HidDesc.wMaxInputLength, &Dev->Layout);
   if (EFI_ERROR (Status)) {
     TouchLog (Dev, "attempt %d: no touch (tip+X+Y) report in descriptor",
               (UINT32)Dev->AttemptCount);
@@ -1020,8 +1077,16 @@ TouchTryBringUp (
   //
   TouchUpdateOrientation (Dev);
 
+  //
+  // A byte takes at least nine wire clocks including ACK. Use a conservative
+  // 25 us/byte lower bound (400 kHz) and never poll faster than 100 Hz.
+  //
+  PollPeriod = MAX (
+                 (UINT64)TOUCH_POLL_PERIOD,
+                 (UINT64)Dev->HidDesc.wMaxInputLength * 250
+                 );
   Dev->Ready = TRUE;
-  Status = gBS->SetTimer (Dev->PollEvent, TimerPeriodic, TOUCH_POLL_PERIOD);
+  Status = gBS->SetTimer (Dev->PollEvent, TimerPeriodic, PollPeriod);
   if (EFI_ERROR (Status)) {
     Dev->Ready = FALSE;
     goto Fail;
@@ -1117,11 +1182,11 @@ TouchI2cDxeEntry (
             TOUCH_DRIVER_VERSION, Time.Year, Time.Month, Time.Day,
             Time.Hour, Time.Minute, Time.Second);
 
-  TouchReadDmiProduct ();
-  TouchLog (Dev, "DMI product: '%a'%a",
-            mDmiProduct,
-            (mDmiProduct[0] == '\0') ? " (SMBIOS unreadable; DMI profile "
-                                       "filter off)" : "");
+  TouchReadDmiIdentity ();
+  TouchLog (Dev, "DMI product: '%a'; board: '%a'%a",
+            mDmiProduct, mDmiBoard,
+            ((mDmiProduct[0] == '\0') && (mDmiBoard[0] == '\0'))
+              ? " (SMBIOS unreadable; probing disabled)" : "");
 
   //
   // Census before we install anything: a nonzero count means the firmware's
@@ -1138,6 +1203,9 @@ TouchI2cDxeEntry (
   TouchLog (Dev, "pre-existing AbsolutePointer handles: %d",
             (UINT32)HandleCount);
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
+    if (!TouchProfileMatchesIdentity (&mProfiles[p])) {
+      continue;
+    }
     TouchLog (Dev, "profile '%a': AOAC dev %d status 0x%02x; COMP_TYPE@%08x "
               "0x%08x",
               mProfiles[p].Name, mProfiles[p].AoacDev,
@@ -1169,18 +1237,18 @@ TouchI2cDxeEntry (
                              TouchWaitForInput, Dev,
                              &Dev->AbsolutePointer.WaitForInput);
   if (EFI_ERROR (Status)) {
-    return EFI_SUCCESS;                    // inert but resident
+    goto Inert;
   }
   Status = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
                              TouchPoll, Dev, &Dev->PollEvent);
   if (EFI_ERROR (Status)) {
-    return EFI_SUCCESS;
+    goto Inert;
   }
   Status = gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY,
                              TouchExitBootServices, Dev,
                              &Dev->ExitBootEvent);
   if (EFI_ERROR (Status)) {
-    return EFI_SUCCESS;
+    goto Inert;
   }
 
   Status = gBS->InstallMultipleProtocolInterfaces (
@@ -1189,7 +1257,7 @@ TouchI2cDxeEntry (
                   NULL);
   if (EFI_ERROR (Status)) {
     TouchLog (Dev, "protocol install failed: %r", Status);
-    return EFI_SUCCESS;
+    goto Inert;
   }
   TouchLog (Dev, "AbsolutePointer protocol installed at entry");
 
@@ -1205,5 +1273,26 @@ TouchI2cDxeEntry (
     }
   }
 
+  return EFI_SUCCESS;
+
+Inert:
+  if (Dev->RetryEvent != NULL) {
+    gBS->SetTimer (Dev->RetryEvent, TimerCancel, 0);
+    gBS->CloseEvent (Dev->RetryEvent);
+  }
+  if (Dev->PollEvent != NULL) {
+    gBS->SetTimer (Dev->PollEvent, TimerCancel, 0);
+    gBS->CloseEvent (Dev->PollEvent);
+  }
+  if (Dev->AbsolutePointer.WaitForInput != NULL) {
+    gBS->CloseEvent (Dev->AbsolutePointer.WaitForInput);
+  }
+  if (Dev->ExitBootEvent != NULL) {
+    gBS->CloseEvent (Dev->ExitBootEvent);
+  }
+  if (Dev->InputBuf != NULL) {
+    FreePool (Dev->InputBuf);
+  }
+  FreePool (Dev);
   return EFI_SUCCESS;
 }
