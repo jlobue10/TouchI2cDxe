@@ -8,10 +8,11 @@
 #
 #  Requires a matching SMBIOS product/baseboard profile, then uses that
 #  device's DSDT-confirmed controller and tries known panel addresses and HID
-#  descriptor registers on that controller only. Powers on the gated I2C tile
-#  itself (FCH AOAC), can kick a panel reset GPIO, and retries bring-up in the
-#  background; the entry point never fails, so a missing/unpowered panel
-#  cannot break the boot manager.
+#  descriptor registers on that controller only; identified devices without
+#  DSDT-confirmed constants (sweep profiles) get a bounded FCH base sweep
+#  instead. Powers on the gated I2C tile itself (FCH AOAC), can kick a panel
+#  reset GPIO, and retries bring-up in the background; the entry point never
+#  fails, so a missing/unpowered panel cannot break the boot manager.
 #
 #  Copyright (c) 2026, jlobue10 and contributors. All rights reserved.
 #  SPDX-License-Identifier: BSD-2-Clause-Patent

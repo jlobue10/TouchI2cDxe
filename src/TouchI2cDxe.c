@@ -43,7 +43,9 @@
   Detection first requires a matching SMBIOS product/baseboard profile. It
   tries that profile's DSDT-confirmed controller base, slave address and HID
   descriptor register, then tries alternate addresses/registers on that same
-  controller only. Unknown hardware is never probed through fixed MMIO bases.
+  controller only. Identified devices without DSDT-confirmed constants
+  (sweep profiles) get the bounded FCH base sweep instead. Unknown hardware
+  is never probed through fixed MMIO bases.
 
   The two Steam Deck models are indistinguishable on the I2C side (same
   controller, slave address and descriptor register); only the panel reset
@@ -134,12 +136,23 @@
 //     FTS3528 slave 0x38, _DSM func 1 = 0x0000, AOAC device 6) except the
 //     panel reset line: GpioIo output GPIO 69 (GpioInt 68 unused).
 //
+//
+// A profile with I2cBase == 0 is a "sweep profile": the device is positively
+// identified via SMBIOS, but its panel constants are not DSDT-confirmed, so
+// detection sweeps the fixed FCH controller bases x candidate addresses x
+// descriptor registers -- the pre-v10 global sweep, now allowed only on
+// hardware whose identity says those fixed MMIO ranges are the AMD FCH.
+// SlaveAddr/HidDescReg are unused for sweep profiles; AoacDev must be
+// TOUCH_AOAC_SWEEP (all four I2C tiles are un-gated for the sweep).
+//
+#define TOUCH_AOAC_SWEEP  0xFF
+
 typedef struct {
   CONST CHAR8  *Name;
   CONST CHAR8  *DmiProduct;    // exact SMBIOS Type 1 product name
   CONST CHAR8  *DmiBoardA;     // accepted SMBIOS Type 2 product names
   CONST CHAR8  *DmiBoardB;
-  UINT32       I2cBase;
+  UINT32       I2cBase;        // 0 = sweep profile (see above)
   UINT8        SlaveAddr;
   UINT16       HidDescReg;
   UINT8        AoacDev;        // FCH AOAC device index of the I2C tile
@@ -155,6 +168,18 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
   { "Steam Deck LCD (FocalTech FTS3528)", "Jupiter", NULL, NULL,
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (69) },
+  //
+  // Sweep profiles: identified AMD handhelds whose panel constants are not
+  // DSDT-confirmed. Board/product strings per the Linux kernel's DMI quirk
+  // tables (asus-wmi / drm_panel_orientation_quirks). Untested on hardware;
+  // worst case is EFI_NOT_FOUND, same as no profile at all.
+  //
+  { "ROG Ally 2023 (sweep; Goodix GT7868Q expected)", NULL, "RC71L", NULL,
+    0, 0, 0x0000, TOUCH_AOAC_SWEEP, 0 },
+  { "ROG Ally X 2024 (sweep)", NULL, "RC72LA", NULL,
+    0, 0, 0x0000, TOUCH_AOAC_SWEEP, 0 },
+  { "Lenovo Legion Go 8APU1 (sweep)", "83E1", NULL, NULL,
+    0, 0, 0x0000, TOUCH_AOAC_SWEEP, 0 },
 };
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
@@ -218,6 +243,16 @@ STATIC CONST UINT8   mCandidateAddrs[]    = {
   NVTK_I2C_ADDR, FTS_I2C_ADDR, GOODIX_I2C_ADDR_A, GOODIX_I2C_ADDR_B
 };
 STATIC CONST UINT16  mCandidateDescRegs[] = { 0x0000, 0x0001, 0x0020 };
+//
+// Controller bases tried by sweep profiles only (identity-gated; see
+// TOUCH_AOAC_SWEEP). Bases 0-3 map to AOAC tiles I2C0-I2C3;
+// DW_I2C_FCH_BASE_4 has no known AOAC index and is probed only if already
+// powered.
+//
+STATIC CONST UINT32  mSweepBases[] = {
+  DW_I2C_FCH_BASE_0, DW_I2C_FCH_BASE_1, DW_I2C_FCH_BASE_2,
+  DW_I2C_FCH_BASE_3, DW_I2C_FCH_BASE_4
+};
 
 //
 // SMBIOS system and baseboard product names, read once at entry ("" when
@@ -795,7 +830,8 @@ TouchResetKick (
 /**
   Find the panel: walk positively identified profiles (un-gating only their
   I2C tile and trying the DSDT-confirmed constants), then sweep alternate
-  addresses and descriptor registers on those same controllers. On success
+  addresses and descriptor registers on those same controllers — or, for an
+  identified sweep profile, across the fixed FCH bases. On success
   Dev->I2cBase / Dev->SlaveAddr / Dev->HidDesc / Dev->Profile are filled and
   the controller is initialized and targeting the panel.
 
@@ -818,7 +854,8 @@ TouchDetect (
 
   //
   // Profile pass: each profile's own tile, base, address, descriptor
-  // register. First match wins.
+  // register. First match wins. Sweep profiles have no DSDT-confirmed
+  // constants to try here; the fallback below handles them.
   //
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     CONST TOUCH_PROFILE  *Prof = &mProfiles[p];
@@ -832,6 +869,10 @@ TouchDetect (
       continue;
     }
     IdentityMatched = TRUE;
+    if (Prof->I2cBase == 0) {
+      ProfStatus[p] = EFI_NOT_FOUND;             // sweep profile, see below
+      continue;
+    }
 
     Status = FchAoacPowerOnI2c (Prof->AoacDev, &Fresh);
     if (EFI_ERROR (Status)) {
@@ -874,31 +915,63 @@ TouchDetect (
 
   //
   // Fallback sweep for panel variants. Keep it on controllers belonging to a
-  // positively identified profile; never enumerate fixed MMIO bases globally.
+  // positively identified profile; never enumerate fixed MMIO bases on
+  // unidentified hardware. A DSDT-confirmed profile sweeps alternate
+  // addresses/registers on its own controller; a sweep profile
+  // (I2cBase == 0) sweeps all fixed FCH bases, since its identity already
+  // established that those addresses are the AMD FCH.
   //
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     CONST TOUCH_PROFILE  *Prof;
+    CONST UINT32         *Bases;
+    BOOLEAN              FreshByTile[4];
+    UINTN                BaseCount, b;
 
     Prof = &mProfiles[p];
-    if (!TouchProfileMatchesIdentity (Prof) ||
-        !DwI2cControllerPresent (Prof->I2cBase)) {
+    if (!TouchProfileMatchesIdentity (Prof)) {
       continue;
     }
-    for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
-      if (EFI_ERROR (DwI2cInit (Prof->I2cBase, mCandidateAddrs[a], FALSE))) {
-        continue;
-      }
-      for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
-        if (!EFI_ERROR (I2cHidReadDescriptor (Prof->I2cBase,
-                                              mCandidateDescRegs[r],
-                                              &Dev->HidDesc))) {
-          Dev->I2cBase   = Prof->I2cBase;
-          Dev->SlaveAddr = mCandidateAddrs[a];
-          Dev->Profile   = Prof;
-          return EFI_SUCCESS;
+    ZeroMem (FreshByTile, sizeof (FreshByTile));
+    if (Prof->I2cBase != 0) {
+      Bases     = &Prof->I2cBase;
+      BaseCount = 1;
+    } else {
+      //
+      // Un-gate the four fixed-base tiles so the COMP_TYPE probe sees them.
+      //
+      for (b = 0; b < 4; b++) {
+        if (!EFI_ERROR (FchAoacPowerOnI2c ((UINT8)(FCH_AOAC_DEV_I2C0 + b),
+                                           &Fresh)) && Fresh) {
+          FreshByTile[b] = TRUE;
         }
       }
-      DwI2cDisable (Prof->I2cBase);
+      Bases     = mSweepBases;
+      BaseCount = ARRAY_SIZE (mSweepBases);
+    }
+    for (b = 0; b < BaseCount; b++) {
+      BOOLEAN  TileFresh;
+
+      if (!DwI2cControllerPresent (Bases[b])) {
+        continue;
+      }
+      TileFresh = ((Prof->I2cBase == 0) && (b < 4)) ? FreshByTile[b] : FALSE;
+      for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
+        if (EFI_ERROR (DwI2cInit (Bases[b], mCandidateAddrs[a], TileFresh))) {
+          continue;
+        }
+        for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
+          if (!EFI_ERROR (I2cHidReadDescriptor (Bases[b],
+                                                mCandidateDescRegs[r],
+                                                &Dev->HidDesc))) {
+            Dev->I2cBase   = Bases[b];
+            Dev->SlaveAddr = mCandidateAddrs[a];
+            Dev->Profile   = Prof;
+            ProfStatus[p]  = EFI_SUCCESS;
+            return EFI_SUCCESS;
+          }
+        }
+        DwI2cDisable (Bases[b]);
+      }
     }
   }
   return EFI_NOT_FOUND;
@@ -1204,6 +1277,11 @@ TouchI2cDxeEntry (
             (UINT32)HandleCount);
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     if (!TouchProfileMatchesIdentity (&mProfiles[p])) {
+      continue;
+    }
+    if (mProfiles[p].I2cBase == 0) {
+      TouchLog (Dev, "profile '%a': identity-gated FCH base sweep",
+                mProfiles[p].Name);
       continue;
     }
     TouchLog (Dev, "profile '%a': AOAC dev %d status 0x%02x; COMP_TYPE@%08x "
