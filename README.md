@@ -6,10 +6,10 @@
 > original ROG Xbox Ally X support.
 
 **Status: working on the ROG Xbox Ally X (since v1.0.0), the Steam Deck
-OLED (since v1.1.0), the Steam Deck LCD (since v1.2.0) and the ASUS Zenbook
-Pro 14 Duo UX8402VV (since v1.3.1, the first Intel-platform device) — all
-confirmed on hardware, including the portrait-to-landscape rotation on both
-Decks.**
+OLED (since v1.1.0), the Steam Deck LCD (since v1.2.0), the ASUS Zenbook
+Pro 14 Duo UX8402VV (since v1.3.1, the first Intel-platform device) and the
+GPD WIN 5 (`G1618-05`) — all confirmed on hardware, including the
+portrait-to-landscape rotation on both Decks.**
 
 A UEFI driver that makes a built-in **HID-over-I2C touchscreen** usable in
 the [rEFInd](https://www.rodsbooks.com/refind/)
@@ -23,6 +23,7 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 | Device | Panel | Controller | I2C addr | Notes |
 |---|---|---|---|---|
 | ASUS ROG Xbox Ally X | Novatek NVTK0603 | `AMDI0010` I2C0 @ `0xFEDC2000` | `0x01` | confirmed working |
+| GPD WIN 5 (`G1618-05`) | Novatek NVTK0603 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x01` | confirmed working |
 | Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | ASUS Zenbook Pro 14 Duo (`UX8402VV`) | ELAN9008 (main OLED) | Intel Serial IO I2C0, PCI `00:15.0` (DID `0x51E8`), BAR above 4 GiB | `0x10` | confirmed working (first Intel-platform device) |

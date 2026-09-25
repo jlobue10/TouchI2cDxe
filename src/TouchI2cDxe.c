@@ -7,6 +7,7 @@
     - ASUS ROG Xbox Ally X      -- Novatek NVTK0603,  I2C0 @ 0xFEDC2000, addr 0x01
     - Steam Deck OLED (Galileo) -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
     - Steam Deck LCD (Jupiter)  -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
+    - GPD WIN 5 (G1618-05)      -- Novatek NVTK0603,  I2C1 @ 0xFEDC3000, addr 0x01
 
     Layer 0  FCH AOAC power un-gating                 -- FchAoac.h + here
     Layer 1  DesignWare I2C master (MMIO, polled)     -- DwI2c.c
@@ -189,6 +190,8 @@ typedef struct {
 STATIC CONST TOUCH_PROFILE  mProfiles[] = {
   { "ROG Xbox Ally X (Novatek NVTK0603)", NULL, "RC73XA", "RC73YA",
     DW_I2C_FCH_BASE_0, NVTK_I2C_ADDR, 0x0000, FCH_AOAC_DEV_I2C0, 0 },
+  { "GPD WIN 5 (Novatek NVTK0603)", "G1618-05", NULL, NULL,
+    DW_I2C_FCH_BASE_1, NVTK_I2C_ADDR, 0x0000, FCH_AOAC_DEV_I2C1, 0 },
   { "Steam Deck OLED (FocalTech FTS3528)", "Galileo", NULL, NULL,
     DW_I2C_FCH_BASE_1, FTS_I2C_ADDR,  0x0000, FCH_AOAC_DEV_I2C1,
     AMD_GPIO_REG (85) },
