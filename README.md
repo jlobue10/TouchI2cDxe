@@ -8,7 +8,7 @@
 **Status: working on the ROG Xbox Ally X (since v1.0.0), the Steam Deck
 OLED (since v1.1.0), the Steam Deck LCD (since v1.2.0), the ASUS Zenbook
 Pro 14 Duo UX8402VV (since v1.3.1, the first Intel-platform device) and the
-GPD WIN 5 (`G1618-05`) — all confirmed on hardware, including the
+GPD WIN 5 (`G1618-05`, since v1.4.0) — all confirmed on hardware, including the
 portrait-to-landscape rotation on both Decks.**
 
 A UEFI driver that makes a built-in **HID-over-I2C touchscreen** usable in
