@@ -534,6 +534,42 @@ TouchLogInit (
   Dev->LogDevice = LoadedImage->DeviceHandle;
 }
 
+/**
+  Load-time console output is opt-in: the driver only Print()s its bring-up
+  progress when a \TouchI2c.verbose marker file sits next to \TouchI2c.log.
+  Everything printed is also in the log, so normal boots stay silent.
+
+  @retval TRUE   The marker file exists on the driver's volume.
+  @retval FALSE  No marker, or the volume could not be opened.
+**/
+STATIC
+BOOLEAN
+TouchVerboseMarkerPresent (
+  IN TOUCH_DEV  *Dev
+  )
+{
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *Sfs;
+  EFI_FILE_PROTOCOL                *Root;
+  EFI_FILE_PROTOCOL                *File;
+  BOOLEAN                          Present;
+
+  if ((Dev->LogDevice == NULL) ||
+      EFI_ERROR (gBS->HandleProtocol (Dev->LogDevice,
+                                      &gEfiSimpleFileSystemProtocolGuid,
+                                      (VOID **)&Sfs)) ||
+      EFI_ERROR (Sfs->OpenVolume (Sfs, &Root))) {
+    return FALSE;
+  }
+
+  Present = !EFI_ERROR (Root->Open (Root, &File, L"TouchI2c.verbose",
+                                    EFI_FILE_MODE_READ, 0));
+  if (Present) {
+    File->Close (File);
+  }
+  Root->Close (Root);
+  return Present;
+}
+
 // ---------------------------------------------------------------------------
 // Layer 0: FCH AOAC power gating
 // ---------------------------------------------------------------------------
@@ -1345,15 +1381,17 @@ TouchI2cDxeEntry (
     return EFI_SUCCESS;
   }
   Dev->Signature = TOUCH_SIG;
-  Dev->Verbose   = TRUE;
 
   TouchLogInit (Dev, ImageHandle);
+  Dev->Verbose = TouchVerboseMarkerPresent (Dev);
   if (EFI_ERROR (gRT->GetTime (&Time, NULL))) {
     ZeroMem (&Time, sizeof (Time));
   }
   TouchLog (Dev, "==== TouchI2cDxe %a load %04d-%02d-%02d %02d:%02d:%02d ====",
             TOUCH_DRIVER_VERSION, Time.Year, Time.Month, Time.Day,
             Time.Hour, Time.Minute, Time.Second);
+  TouchLog (Dev, "console output: %a",
+            Dev->Verbose ? "on (\\TouchI2c.verbose present)" : "off");
 
   TouchReadDmiIdentity ();
   TouchLog (Dev, "DMI product: '%a'; board: '%a'%a",

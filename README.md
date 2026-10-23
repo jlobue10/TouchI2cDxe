@@ -123,6 +123,10 @@ devices.
   live panel immediately.
 - The driver appends a diagnostic log to `\TouchI2c.log` on the ESP —
   check it to see what detection found (per-profile probe results included).
+- The driver is silent on screen by default. To also print its bring-up
+  progress on the console before the rEFInd menu, create an empty
+  `\TouchI2c.verbose` file next to the log (e.g. `sudo touch /esp/TouchI2c.verbose`
+  or `/boot/TouchI2c.verbose` from Linux); delete it to go quiet again.
 - For deeper digging: run [`tools/probe/TouchProbe.efi`](tools/probe/TouchProbe.c)
   from the UEFI Shell and [`tools/collect-hardware-info.sh`](tools/collect-hardware-info.sh)
   (Linux) per [`tools/uefi-probe.md`](tools/uefi-probe.md).
