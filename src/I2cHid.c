@@ -1,6 +1,7 @@
 /** @file
-  HID-over-I2C transport (Microsoft HIDI2C spec v1.0) on top of the DesignWare
-  master. Layer 2 of AllyTouchI2cDxe.
+  HID-over-I2C transport (Microsoft HIDI2C spec v1.0) on top of whichever
+  layer-1 transport I2cBus.c has selected (DesignWare, MediaTek or a
+  firmware-published I2C host). Layer 2 of TouchI2cDxe.
 
   Register reads are "write 16-bit register address LE, repeated-START read".
   Input reports are retrieved with a *plain* read (no register write) -- the
@@ -13,7 +14,7 @@
 
 #include <Uefi.h>
 
-#include "DwI2c.h"
+#include "I2cBus.h"
 #include "I2cHid.h"
 
 EFI_STATUS
@@ -28,7 +29,7 @@ I2cHidReadRegister (
 
   W[0] = (UINT8)(Reg & 0xFF);
   W[1] = (UINT8)(Reg >> 8);
-  return DwI2cXfer (Base, W, sizeof (W), Buf, Len);
+  return I2cBusXfer (Base, W, sizeof (W), Buf, Len);
 }
 
 EFI_STATUS
@@ -38,7 +39,7 @@ I2cHidRawRead (
   IN  UINTN   Len
   )
 {
-  return DwI2cXfer (Base, NULL, 0, Buf, Len);
+  return I2cBusXfer (Base, NULL, 0, Buf, Len);
 }
 
 /**
@@ -59,7 +60,7 @@ I2cHidCommand (
   W[1] = (UINT8)(CmdReg >> 8);
   W[2] = Arg;
   W[3] = Opcode;
-  return DwI2cXfer (Base, W, sizeof (W), NULL, 0);
+  return I2cBusXfer (Base, W, sizeof (W), NULL, 0);
 }
 
 EFI_STATUS
