@@ -9,14 +9,18 @@
 OLED (since v1.1.0), the Steam Deck LCD (since v1.2.0), the ASUS Zenbook
 Pro 14 Duo UX8402VV (since v1.3.1, the first Intel-platform device) and the
 GPD WIN 5 (`G1618-05`, since v1.4.0) — all confirmed on hardware, including the
-portrait-to-landscape rotation on both Decks.**
+portrait-to-landscape rotation on both Decks. v1.4.2 adds the first ARM64
+device, the ASUS ProArt P16 `H7607BA` (NVIDIA N1X, MediaTek I2C), as a
+separate `TouchI2cDxe_aa64.efi` build — constants confirmed from its
+DSDT/SSDT and firmware data block, not yet confirmed on hardware.**
 
 A UEFI driver that makes a built-in **HID-over-I2C touchscreen** usable in
 the [rEFInd](https://www.rodsbooks.com/refind/)
 boot menu, by producing `EFI_ABSOLUTE_POINTER_PROTOCOL`. rEFInd consumes that
 protocol natively, so no rEFInd changes are needed — the driver is meant to load
 from rEFInd's `drivers_x64/` folder alongside
-[`UsbXbox360Dxe.efi`](https://github.com/jlobue10/UsbXbox360Dxe).
+[`UsbXbox360Dxe.efi`](https://github.com/jlobue10/UsbXbox360Dxe) (or from
+`drivers_aa64/` on ARM64, where the release asset is `TouchI2cDxe_aa64.efi`).
 
 Supported devices (the profile table in `src/TouchI2cDxe.c`):
 
@@ -27,6 +31,7 @@ Supported devices (the profile table in `src/TouchI2cDxe.c`):
 | Steam Deck OLED (Galileo) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | Steam Deck LCD (Jupiter) | FocalTech FTS3528 | `AMDI0010` I2C1 @ `0xFEDC3000` | `0x38` | confirmed working (incl. portrait→landscape rotation) |
 | ASUS Zenbook Pro 14 Duo (`UX8402VV`) | ELAN9008 (main OLED) | Intel Serial IO I2C0, PCI `00:15.0` (DID `0x51E8`), BAR above 4 GiB | `0x10` | confirmed working (first Intel-platform device) |
+| ASUS ProArt P16 (`H7607BA`, NVIDIA N1X, ARM64) | Ilitek `ILTK0001` | MediaTek `NVDA0200` I2C2 @ `0x16BA0000` + APDMA @ `0x16AA0000` | `0x10` | first ARM64 / MediaTek device; `TouchI2cDxe_aa64.efi`; untested on hardware |
 | ASUS ROG Ally 2023 (`RC71L`) | Goodix GT7868Q expected | sweep | sweep | untested sweep profile |
 | ASUS ROG Ally X 2024 (`RC72LA`) | unknown | sweep | sweep | untested sweep profile |
 | Lenovo Legion Go (`83E1`) | unknown | sweep | sweep | untested sweep profile; Legion Go 2 pending DMI confirmation |
@@ -46,6 +51,21 @@ through `EFI_PCI_IO_PROTOCOL` and brought up via the LPSS private registers
 landscape-native (3600×2256), so no rotation applies. The ScreenPad Plus
 (ELAN9009 on `00:15.2`) is deliberately not targeted — rEFInd renders on
 the main panel.
+
+The ProArt P16 is the first ARM64 device and the first non-DesignWare
+controller: the NVIDIA N1X's MediaTek `i2c-mt65xx` block has no PIO data
+path, so `src/MtkI2c.c` drives its APDMA channel for every transfer (two
+page-sized DMA buffers below 4 GiB; the SoC declares the controller
+cache-coherent). Because the laptop's keyboard is HID-over-I2C on the *same*
+controller, the firmware keeps that bus alive pre-boot: the driver first
+looks for the firmware's own `EFI_I2C_HOST_PROTOCOL` /
+`EFI_I2C_MASTER_PROTOCOL` for `NVDA0200` UID 2 (device-path match) and
+transacts through it when present, so the two drivers queue instead of
+colliding; only without one does it program the controller directly — at
+`TPL_HIGH_LEVEL` per transfer, inheriting the firmware's bus timing (the
+keyboard expects it), with the 400 kHz / 124.8 MHz timing from
+`tools/mtk-i2c-timing.py` as the fallback for an unprogrammed controller.
+Its 16384×16384 touch matrix is landscape-native, so no rotation applies.
 
 This is a sibling to the Xbox 360 controller driver: that one binds USB gamepads;
 this one binds the I2C-HID touch panel that a USB driver structurally cannot see.
@@ -106,14 +126,17 @@ time.
 
 Drop `TouchI2cDxe.efi` (from the latest release or a CI artifact)
 into rEFInd's `drivers_x64/` folder on the ESP (next to `UsbXbox360Dxe.efi`
-if you use that too) and reboot. No configuration is needed. On Secure Boot
+if you use that too) and reboot. On an ARM64 machine (ProArt P16) take
+`TouchI2cDxe_aa64.efi` from the release instead and place it as
+`drivers_aa64/TouchI2cDxe.efi`. No configuration is needed. On Secure Boot
 setups that enforce their own signatures (e.g. CachyOS with sbctl), sign the
 `.efi` like the other rEFInd binaries.
 
 [rEFInd_GUI](https://github.com/jlobue10/rEFInd_GUI) and
 [SteamDeck_rEFInd](https://github.com/jlobue10/SteamDeck_rEFInd) install this
-driver automatically on ROG Xbox Ally / Ally X and Steam Deck (LCD and OLED)
-devices.
+driver automatically on ROG Xbox Ally / Ally X, Steam Deck (LCD and OLED),
+Zenbook UX8402VV, GPD WIN 5 and (rEFInd_GUI 3.5.3+, the aa64 build) ProArt
+P16 devices.
 
 ### Troubleshooting
 
@@ -137,12 +160,17 @@ devices.
 DESIGN.md                     feasibility spike, architecture, sources
 src/
   FchAoac.h                   Layer 0: AMD FCH AOAC power-gating regs
+  IntelLpss.c/.h              Layer 0: Intel Serial IO (PCI) bring-up
   DwI2c.c/.h                  Layer 1: DesignWare I2C master (MMIO, polled)
+  MtkI2c.c/.h                 Layer 1: MediaTek I2C master + APDMA (ARM64)
+  I2cBus.c/.h                 Layer 1 dispatch, incl. the firmware's own
+                              EFI_I2C_HOST/MASTER when it publishes one
   I2cHid.c/.h                 Layer 2: HID-over-I2C transport
   HidParse.c/.h               Layer 3: report-descriptor parse (tip/X/Y)
   TouchI2cDxe.inf/.c          device profiles, detection, bring-up, retry
                               loop, AbsolutePointer
 tools/
+  mtk-i2c-timing.py           MediaTek timing-register calculator (offline)
   collect-hardware-info.sh    Linux-side ACPI/I2C/GPIO dumper (fallback)
   uefi-probe.md               the go/no-go procedure
   probe/TouchProbe.c/.inf     standalone UEFI Shell liveness probe
@@ -154,11 +182,13 @@ test_build.sh                 local EDK2 build (Linux / WSL)
 
 Same EDK2 build as `UsbXbox360Dxe`. Easiest paths:
 
-- **CI**: every push builds `TouchI2cDxe.efi` + `TouchProbe.efi` as
-  workflow artifacts (`.github/workflows/build.yml`); tags `v*` publish a
-  release.
+- **CI**: every push builds `TouchI2cDxe.efi` + `TouchProbe.efi` (X64) and
+  `TouchI2cDxe_aa64.efi` (AARCH64, cross-compiled) as workflow artifacts
+  (`.github/workflows/build.yml`); tags `v*` publish a release.
 - **Locally** (Linux or WSL): `./test_build.sh` clones `edk2-stable202411`,
-  builds both modules, and drops the `.efi`s into `output/`.
+  builds both modules, and drops the `.efi`s into `output/`;
+  `ARCH=AARCH64 ./test_build.sh` builds the ARM64 driver (natively on an
+  ARM64 host, or with `GCC5_AARCH64_PREFIX=aarch64-linux-gnu-` on x86-64).
 
 ## License
 

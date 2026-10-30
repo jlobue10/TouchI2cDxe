@@ -81,8 +81,9 @@ typedef struct {
 #define I2C_HID_REPORT_TYPE_FEATURE   0x03
 
 //
-// Layer-2 API (I2cHid.c). All calls assume DwI2cInit already targeted the
-// device's slave address on this controller.
+// Layer-2 API (I2cHid.c). All calls assume the selected layer-1 transport
+// (I2cBus.c) already targets the device's slave address; Base only matters
+// on the DesignWare transport.
 //
 
 EFI_STATUS

@@ -30,7 +30,8 @@ jobs:
     - name: Install dependencies
       run: |
         apt-get update
-        apt-get install -y build-essential uuid-dev iasl git nasm python3
+        apt-get install -y build-essential uuid-dev iasl git nasm python3 \
+          gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
     - name: Clone EDK2
       run: |
@@ -62,7 +63,7 @@ jobs:
         cd edk2
         sed -i '/\[Components\]/a \  MdeModulePkg/TouchI2cDxe/src/TouchI2cDxe.inf\n  MdeModulePkg/TouchI2cDxe/tools/probe/TouchProbe.inf' MdeModulePkg/MdeModulePkg.dsc
 
-    - name: Build driver and probe
+    - name: Build driver and probe (X64)
       run: |
         cd edk2
         export WORKSPACE=$PWD
@@ -71,11 +72,26 @@ jobs:
         build -a X64 -t GCC5 -b RELEASE -p MdeModulePkg/MdeModulePkg.dsc -m MdeModulePkg/TouchI2cDxe/src/TouchI2cDxe.inf
         build -a X64 -t GCC5 -b RELEASE -p MdeModulePkg/MdeModulePkg.dsc -m MdeModulePkg/TouchI2cDxe/tools/probe/TouchProbe.inf
 
+    # The ARM64 build (NVIDIA N1X laptops: ASUS ProArt P16) is cross-compiled
+    # with the Debian aarch64 toolchain; the probe stays x86-only (it sweeps
+    # AMD/Intel controllers by fixed address / PCI).
+    - name: Build driver (AARCH64)
+      run: |
+        cd edk2
+        export WORKSPACE=$PWD
+        export PACKAGES_PATH=$WORKSPACE
+        export GCC5_AARCH64_PREFIX=aarch64-linux-gnu-
+        source edksetup.sh
+        build -a AARCH64 -t GCC5 -b RELEASE -p MdeModulePkg/MdeModulePkg.dsc -m MdeModulePkg/TouchI2cDxe/src/TouchI2cDxe.inf
+
     - name: Prepare artifact
       run: |
         mkdir -p output
         cp edk2/Build/MdeModule/RELEASE_GCC5/X64/TouchI2cDxe.efi output/
         cp edk2/Build/MdeModule/RELEASE_GCC5/X64/TouchProbe.efi output/
+        # Asset name carries the EFI architecture suffix; the install scripts
+        # place it on the ESP as drivers_aa64/TouchI2cDxe.efi.
+        cp edk2/Build/MdeModule/RELEASE_GCC5/AARCH64/TouchI2cDxe.efi output/TouchI2cDxe_aa64.efi
         cp README.md output/
 
     - name: Upload artifact

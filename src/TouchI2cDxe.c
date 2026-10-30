@@ -1,16 +1,22 @@
 /** @file
   TouchI2cDxe -- EFI_ABSOLUTE_POINTER_PROTOCOL producer for HID-over-I2C
-  touchscreens on AMD FCH (DesignWare AMDI0010) handhelds, so rEFInd can be
-  driven by touch. Grown out of AllyTouchI2cDxe; supported devices live in
-  the mProfiles table below:
+  touchscreens (AMD FCH and Intel Serial IO DesignWare controllers on x86-64
+  handhelds/laptops, MediaTek controllers on the NVIDIA N1X ARM64 laptops),
+  so rEFInd can be driven by touch. Grown out of AllyTouchI2cDxe; supported
+  devices live in the mProfiles table below:
 
     - ASUS ROG Xbox Ally X      -- Novatek NVTK0603,  I2C0 @ 0xFEDC2000, addr 0x01
     - Steam Deck OLED (Galileo) -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
     - Steam Deck LCD (Jupiter)  -- FocalTech FTS3528, I2C1 @ 0xFEDC3000, addr 0x38
     - GPD WIN 5 (G1618-05)      -- Novatek NVTK0603,  I2C1 @ 0xFEDC3000, addr 0x01
+    - ASUS Zenbook UX8402VV     -- ELAN9008, Intel Serial IO 00:15.0, addr 0x10
+    - ASUS ProArt P16 H7607BA   -- Ilitek ILTK0001, MediaTek I2C2 @ 0x16BA0000
+                                   (+ APDMA @ 0x16AA0000), addr 0x10 (AARCH64)
 
-    Layer 0  FCH AOAC power un-gating                 -- FchAoac.h + here
+    Layer 0  FCH AOAC power un-gating / Intel LPSS    -- FchAoac.h, IntelLpss.c
     Layer 1  DesignWare I2C master (MMIO, polled)     -- DwI2c.c
+             MediaTek I2C master + APDMA (polled)     -- MtkI2c.c
+             or the firmware's own EFI_I2C_HOST/MASTER -- I2cBus.c
     Layer 2  HID-over-I2C transport                   -- I2cHid.c
     Layer 3  report parse -> AbsolutePointer          -- HidParse.c + here
 
@@ -107,8 +113,10 @@
 
 #include "DwI2c.h"
 #include "FchAoac.h"
+#include "I2cBus.h"
 #include "I2cHid.h"
 #include "IntelLpss.h"
+#include "MtkI2c.h"
 #include "HidParse.h"
 
 //
@@ -148,6 +156,18 @@
 //     and descriptor register -- not targeted: rEFInd renders on the main
 //     panel.)
 //
+//   ASUS ProArt P16 H7607BA (NVIDIA N1X, AARCH64):  the first ARM64 device
+//     and the first MediaTek controller. \_SB.I2C2 (NVDA0200 _UID 2) _CRS:
+//     I2C registers Memory32Fixed 0x16BA0000 (4 KiB) and APDMA channel
+//     0x16AA0000 (0x80), _CCA = 1; \_SB.I2C2.TPL0 (PNP0C50, _HID patched at
+//     runtime from the firmware data block to ILTK0001) I2cSerialBusV2
+//     slave 0x10 (TPLA), 400 kHz (TPLS); _DSM(HID-I2C, func 1) = 0x0001;
+//     GpioInt pin 0x1F on GIO0 (unused -- polled). No _PS0/_RST: the
+//     firmware keeps the controller clocked (its own keyboard, MKB0001,
+//     is HID-over-I2C on the same I2C2), which is also why the firmware's
+//     EFI I2C host/master for that controller is preferred when published
+//     (I2cBus.c) and why the raw MMIO path inherits its bus timing.
+//
 //
 // A profile with I2cBase == 0 is a "sweep profile": the device is positively
 // identified via SMBIOS, but its panel constants are not DSDT-confirmed, so
@@ -168,7 +188,8 @@
 //
 typedef enum {
   TouchPlatformAmdFch = 0,
-  TouchPlatformIntelLpss
+  TouchPlatformIntelLpss,
+  TouchPlatformMtkI2c        // MediaTek i2c-mt65xx + APDMA (NVIDIA N1X)
 } TOUCH_PLATFORM;
 
 typedef struct {
@@ -185,6 +206,10 @@ typedef struct {
   UINT16          PciDid;         // Intel only: expected device ID...
   UINT8           PciDev;         // ...at PCI 00:PciDev.PciFunc
   UINT8           PciFunc;
+  UINT32          DmaBase;        // MediaTek only: APDMA channel window
+  CONST CHAR8     *AcpiHid;       // MediaTek only: controller's ACPI _HID...
+  UINT32          AcpiUid;        // ...and _UID, to find the firmware's
+                                  // own EFI I2C host/master for it
 } TOUCH_PROFILE;
 
 STATIC CONST TOUCH_PROFILE  mProfiles[] = {
@@ -206,6 +231,15 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
     0, ELAN_I2C_ADDR, 0x0001, 0, 0,
     TouchPlatformIntelLpss, 0x51E8, 0x15, 0x0 },
   //
+  // MediaTek profile (ARM64): I2cBase is the controller register window,
+  // DmaBase its APDMA channel, both from the DSDT. No AOAC, no PCI, no
+  // reset GPIO. Platform disambiguates from the AMD fixed-base model.
+  //
+  { "ASUS ProArt P16 H7607BA (Ilitek ILTK0001)", NULL, "H7607BA", NULL,
+    0x16BA0000, ILTK_I2C_ADDR, 0x0001, 0, 0,
+    TouchPlatformMtkI2c, 0, 0, 0,
+    0x16AA0000, "NVDA0200", 2 },
+  //
   // Sweep profiles: identified AMD handhelds whose panel constants are not
   // DSDT-confirmed. Board/product strings per the Linux kernel's DMI quirk
   // tables (asus-wmi / drm_panel_orientation_quirks). Untested on hardware;
@@ -221,7 +255,7 @@ STATIC CONST TOUCH_PROFILE  mProfiles[] = {
 
 #define TOUCH_PROFILE_COUNT  ARRAY_SIZE (mProfiles)
 
-#define TOUCH_DRIVER_VERSION  "v15"
+#define TOUCH_DRIVER_VERSION  "v16"
 
 //
 // Poll no faster than every 10 ms (EFI timer units are 100 ns). The final
@@ -271,6 +305,10 @@ typedef struct {
   UINTN                           AttemptCount;
   EFI_HANDLE                      Handle;
   EFI_HANDLE                      LogDevice;      // ESP handle; NULL = no log
+  MTK_I2C                         Mtk;            // MediaTek controller state
+  I2C_FW_BUS                      FwBus;          // firmware I2C host/master
+  BOOLEAN                         FwBusSearched;  // per bring-up attempt
+  BOOLEAN                         FwBusFound;
 } TOUCH_DEV;
 
 #define TOUCH_SIG  SIGNATURE_64 ('T','c','h','I','2','c','D','x')
@@ -767,7 +805,7 @@ TouchPoll (
   }
 
   if (Dev->NeedReinit) {
-    if (EFI_ERROR (DwI2cInit (Dev->I2cBase, Dev->SlaveAddr, NULL))) {
+    if (EFI_ERROR (I2cBusReinit (Dev->I2cBase, Dev->SlaveAddr))) {
       return;
     }
     (VOID)I2cHidSetPower (Dev->I2cBase, Dev->HidDesc.wCommandRegister,
@@ -862,7 +900,7 @@ TouchExitBootServices (
     gBS->SetTimer (Dev->RetryEvent, TimerCancel, 0);
   }
   if (Dev->Ready) {
-    DwI2cDisable (Dev->I2cBase);  // leave the bus idle for the OS driver
+    I2cBusDisable (Dev->I2cBase); // leave the bus idle for the OS driver
   }
 }
 
@@ -902,6 +940,67 @@ TouchResetKick (
 }
 
 /**
+  One descriptor-read attempt on a MediaTek profile's controller at
+  SlaveAddr / HidDescReg. The firmware's own EFI I2C host or master for that
+  controller (matched by the ACPI HID/UID in its device path) is used when
+  it exists -- it serialises with the firmware's keyboard traffic on the
+  same bus; otherwise the controller and its APDMA channel are driven
+  directly (MtkI2c.c). On success the matching transport stays selected in
+  I2cBus; on failure the default (DesignWare) selection is restored so no
+  later DesignWare profile is routed through a MediaTek transport.
+**/
+STATIC
+EFI_STATUS
+TouchMtkProbe (
+  IN OUT TOUCH_DEV            *Dev,
+  IN     CONST TOUCH_PROFILE  *Prof,
+  IN     UINT8                SlaveAddr,
+  IN     UINT16               HidDescReg
+  )
+{
+  EFI_STATUS  Status;
+
+  if (!Dev->FwBusSearched) {
+    Dev->FwBusSearched = TRUE;
+    Dev->FwBusFound    = !EFI_ERROR (I2cBusFindFirmwareController (
+                                       Prof->AcpiHid, Prof->AcpiUid,
+                                       &Dev->FwBus));
+    if ((Dev->AttemptCount == 1) || ((Dev->AttemptCount % 10) == 0)) {
+      TouchLog (Dev, "profile '%a': firmware EFI I2C controller for %a/%d: %a",
+                Prof->Name, Prof->AcpiHid, Prof->AcpiUid,
+                Dev->FwBusFound
+                  ? ((Dev->FwBus.Host != NULL) ? "host+master (using host)"
+                                               : "master only (using it)")
+                  : "none; driving the controller + APDMA directly");
+    }
+  }
+
+  if (Dev->FwBusFound) {
+    I2cBusSelectFirmware (&Dev->FwBus, SlaveAddr);
+    Status = I2cHidReadDescriptor (0, HidDescReg, &Dev->HidDesc);
+    if (EFI_ERROR (Status)) {
+      I2cBusSelectDesignWare ();
+    }
+    //
+    // The firmware owns this bus; if the panel does not answer through it,
+    // driving the same controller underneath would only fight it.
+    //
+    return Status;
+  }
+
+  Status = MtkI2cInit (&Dev->Mtk, Prof->I2cBase, Prof->DmaBase, SlaveAddr);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  I2cBusSelectMediaTek (&Dev->Mtk);
+  Status = I2cHidReadDescriptor (0, HidDescReg, &Dev->HidDesc);
+  if (EFI_ERROR (Status)) {
+    I2cBusSelectDesignWare ();
+  }
+  return Status;
+}
+
+/**
   Find the panel: walk positively identified profiles (un-gating only their
   I2C tile and trying the DSDT-confirmed constants), then sweep alternate
   addresses and descriptor registers on those same controllers — or, for an
@@ -925,6 +1024,7 @@ TouchDetect (
   UINTN       p, a, r;
 
   IdentityMatched = FALSE;
+  I2cBusSelectDesignWare ();                     // the AMD/Intel default
 
   //
   // Profile pass: each profile's own tile, base, address, descriptor
@@ -968,6 +1068,19 @@ TouchDetect (
       ProfStatus[p] = Status;
       if (!EFI_ERROR (Status)) {
         Dev->I2cBase   = IntelBase;
+        Dev->SlaveAddr = Prof->SlaveAddr;
+        Dev->Profile   = Prof;
+        return EFI_SUCCESS;
+      }
+      continue;
+    }
+
+    if (Prof->Platform == TouchPlatformMtkI2c) {
+      Status        = TouchMtkProbe (Dev, Prof, Prof->SlaveAddr,
+                                     Prof->HidDescReg);
+      ProfStatus[p] = Status;
+      if (!EFI_ERROR (Status)) {
+        Dev->I2cBase   = Prof->I2cBase;
         Dev->SlaveAddr = Prof->SlaveAddr;
         Dev->Profile   = Prof;
         return EFI_SUCCESS;
@@ -1037,6 +1150,30 @@ TouchDetect (
 
     Prof = &mProfiles[p];
     if (!TouchProfileMatchesIdentity (Prof)) {
+      continue;
+    }
+    if (Prof->Platform == TouchPlatformMtkI2c) {
+      //
+      // Alternate addresses / descriptor registers on this profile's own
+      // controller (through whichever transport TouchMtkProbe picks).
+      // Never the FCH base list.
+      //
+      for (a = 0; a < ARRAY_SIZE (mCandidateAddrs); a++) {
+        for (r = 0; r < ARRAY_SIZE (mCandidateDescRegs); r++) {
+          if ((mCandidateAddrs[a] == Prof->SlaveAddr) &&
+              (mCandidateDescRegs[r] == Prof->HidDescReg)) {
+            continue;                            // the profile pass did it
+          }
+          if (!EFI_ERROR (TouchMtkProbe (Dev, Prof, mCandidateAddrs[a],
+                                         mCandidateDescRegs[r]))) {
+            Dev->I2cBase   = Prof->I2cBase;
+            Dev->SlaveAddr = mCandidateAddrs[a];
+            Dev->Profile   = Prof;
+            ProfStatus[p]  = EFI_SUCCESS;
+            return EFI_SUCCESS;
+          }
+        }
+      }
       continue;
     }
     ZeroMem (FreshByTile, sizeof (FreshByTile));
@@ -1180,8 +1317,9 @@ TouchTryBringUp (
   ZeroMem (&Dev->State, sizeof (Dev->State));
   Dev->StateChanged = FALSE;
   Dev->LastTip      = FALSE;
-  Dev->NeedReinit   = FALSE;
-  Dev->Profile      = NULL;
+  Dev->NeedReinit    = FALSE;
+  Dev->Profile       = NULL;
+  Dev->FwBusSearched = FALSE;      // the firmware may publish I2C late
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     ProfStatus[p] = EFI_NOT_STARTED;
   }
@@ -1204,10 +1342,15 @@ TouchTryBringUp (
     return Status;
   }
 
-  TouchLog (Dev, "attempt %d: panel at base 0x%lx addr 0x%02x (%a), "
+  TouchLog (Dev, "attempt %d: panel at base 0x%lx addr 0x%02x (%a) via %a, "
             "VID 0x%04x PID 0x%04x, reportdesc %d bytes, maxinput %d",
             (UINT32)Dev->AttemptCount, (UINT64)Dev->I2cBase, Dev->SlaveAddr,
             (Dev->Profile != NULL) ? Dev->Profile->Name : "identified profile",
+            (I2cBusKind () == I2cBusFirmware) ? "firmware EFI I2C host/master"
+              : (I2cBusKind () == I2cBusMediaTek)
+                  ? (Dev->Mtk.Inherited ? "MediaTek MMIO+APDMA (firmware timing kept)"
+                                        : "MediaTek MMIO+APDMA (own 400 kHz timing)")
+                  : "DesignWare MMIO",
             Dev->HidDesc.wVendorID, Dev->HidDesc.wProductID,
             Dev->HidDesc.wReportDescLength, Dev->HidDesc.wMaxInputLength);
   if (Dev->Verbose) {
@@ -1413,6 +1556,23 @@ TouchI2cDxeEntry (
   }
   TouchLog (Dev, "pre-existing AbsolutePointer handles: %d",
             (UINT32)HandleCount);
+  {
+    UINTN   Masters, Hosts, Ios, i;
+
+    I2cBusCensus (&Masters, &Hosts, &Ios);
+    TouchLog (Dev, "firmware EFI I2C protocols: %d master, %d host, %d io "
+              "handles", (UINT32)Masters, (UINT32)Hosts, (UINT32)Ios);
+    for (i = 0; (i < Masters) && (i < 8); i++) {
+      CHAR16  *Text;
+
+      Text = I2cBusMasterPathText (i);
+      TouchLog (Dev, "  I2C master %d: %s", (UINT32)i,
+                (Text != NULL) ? Text : L"(no device path)");
+      if (Text != NULL) {
+        FreePool (Text);
+      }
+    }
+  }
   for (p = 0; p < TOUCH_PROFILE_COUNT; p++) {
     if (!TouchProfileMatchesIdentity (&mProfiles[p])) {
       continue;
@@ -1426,6 +1586,17 @@ TouchI2cDxeEntry (
                 "(DID 0x%04x), discovered at detect time",
                 mProfiles[p].Name, mProfiles[p].PciDev, mProfiles[p].PciFunc,
                 mProfiles[p].PciDid);
+      continue;
+    }
+    if (mProfiles[p].Platform == TouchPlatformMtkI2c) {
+      //
+      // No MMIO reads here either: the window may not be mapped for us
+      // until MtkI2cInit registers it with the GCD at detect time.
+      //
+      TouchLog (Dev, "profile '%a': MediaTek %a/%d I2C @0x%08x APDMA @0x%08x, "
+                "transport chosen at detect time",
+                mProfiles[p].Name, mProfiles[p].AcpiHid, mProfiles[p].AcpiUid,
+                mProfiles[p].I2cBase, mProfiles[p].DmaBase);
       continue;
     }
     if (mProfiles[p].I2cBase == 0) {

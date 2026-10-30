@@ -13,16 +13,28 @@ NC='\033[0m'
 
 BUILD_DIR="build_test"
 EDK2_BRANCH="edk2-stable202411"
-ARCH="X64"
+# X64 (default) builds the driver + probe for rEFInd's drivers_x64/;
+# ARCH=AARCH64 builds the driver alone for drivers_aa64/ (the probe sweeps
+# AMD/Intel controllers and is x86-only). On an x86-64 host an AARCH64 build
+# needs a cross compiler: GCC5_AARCH64_PREFIX=aarch64-linux-gnu- (Debian
+# package gcc-aarch64-linux-gnu); on an ARM64 host the native gcc is used.
+ARCH="${ARCH:-X64}"
 TOOLCHAIN="GCC5"
 BUILD_TYPE="${BUILD_TYPE:-RELEASE}"
 MODULE_DIR="MdeModulePkg/TouchI2cDxe"
+if [ "$ARCH" != "X64" ] && [ "$ARCH" != "AARCH64" ]; then
+    echo "Error: ARCH must be X64 or AARCH64 (got '$ARCH')"
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo -e "${YELLOW}[1/8] Checking dependencies...${NC}"
-for tool in git make gcc nasm iasl python3; do
+# nasm is only used by the X64 BaseLib/IoLib assembly.
+DEPS="git make gcc iasl python3"
+[ "$ARCH" = "X64" ] && DEPS="$DEPS nasm"
+for tool in $DEPS; do
     if ! command -v $tool &> /dev/null; then
         echo -e "${RED}Error: $tool is not installed${NC}"
         echo "Debian/Ubuntu: sudo apt install build-essential uuid-dev iasl git nasm python3"
@@ -74,24 +86,41 @@ if ! grep -q "TouchI2cDxe/src/TouchI2cDxe.inf" MdeModulePkg/MdeModulePkg.dsc; th
     sed -i "/\[Components\]/a \  $MODULE_DIR/src/TouchI2cDxe.inf\n  $MODULE_DIR/tools/probe/TouchProbe.inf" MdeModulePkg/MdeModulePkg.dsc
 fi
 
-echo -e "${YELLOW}[7/8] Building driver + probe (${BUILD_TYPE})...${NC}"
+echo -e "${YELLOW}[7/8] Building driver (${ARCH} ${BUILD_TYPE})...${NC}"
 build -a $ARCH -t $TOOLCHAIN -b $BUILD_TYPE \
       -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/src/TouchI2cDxe.inf"
-build -a $ARCH -t $TOOLCHAIN -b $BUILD_TYPE \
-      -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/tools/probe/TouchProbe.inf"
+if [ "$ARCH" = "X64" ]; then
+    echo -e "${YELLOW}      Building probe...${NC}"
+    build -a $ARCH -t $TOOLCHAIN -b $BUILD_TYPE \
+          -p MdeModulePkg/MdeModulePkg.dsc -m "$MODULE_DIR/tools/probe/TouchProbe.inf"
+fi
 
 echo -e "${YELLOW}[8/8] Preparing output...${NC}"
 cd "$SCRIPT_DIR"
 mkdir -p output
 OUT_DIR="$BUILD_DIR/edk2/Build/MdeModule/${BUILD_TYPE}_${TOOLCHAIN}/${ARCH}"
-for f in TouchI2cDxe.efi TouchProbe.efi; do
-    if [ ! -f "$OUT_DIR/$f" ]; then
-        echo -e "${RED}Error: $f not found at $OUT_DIR${NC}"
+if [ "$ARCH" = "X64" ]; then
+    # Release asset names: the x64 driver keeps its historical name (the
+    # rEFInd install scripts fetch it by that name), the AArch64 build
+    # carries the EFI architecture suffix.
+    FILES="TouchI2cDxe.efi:TouchI2cDxe.efi TouchProbe.efi:TouchProbe.efi"
+else
+    FILES="TouchI2cDxe.efi:TouchI2cDxe_aa64.efi"
+fi
+for pair in $FILES; do
+    src="${pair%%:*}"
+    dst="${pair##*:}"
+    if [ ! -f "$OUT_DIR/$src" ]; then
+        echo -e "${RED}Error: $src not found at $OUT_DIR${NC}"
         exit 1
     fi
-    cp "$OUT_DIR/$f" output/
+    cp "$OUT_DIR/$src" "output/$dst"
 done
 
 echo -e "${GREEN}Build completed:${NC}"
-echo -e "  ${GREEN}output/TouchI2cDxe.efi${NC}  -> rEFInd drivers_x64/"
-echo -e "  ${GREEN}output/TouchProbe.efi${NC}   -> run from the UEFI Shell"
+if [ "$ARCH" = "X64" ]; then
+    echo -e "  ${GREEN}output/TouchI2cDxe.efi${NC}       -> rEFInd drivers_x64/"
+    echo -e "  ${GREEN}output/TouchProbe.efi${NC}        -> run from the UEFI Shell"
+else
+    echo -e "  ${GREEN}output/TouchI2cDxe_aa64.efi${NC}  -> rEFInd drivers_aa64/ (as TouchI2cDxe.efi)"
+fi

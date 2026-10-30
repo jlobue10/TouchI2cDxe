@@ -1,11 +1,13 @@
 ## @file
 #  TouchI2cDxe -- produces EFI_ABSOLUTE_POINTER_PROTOCOL for HID-over-I2C
 #  touchscreens on DesignWare I2C controllers (AMD FCH AMDI0010 and Intel
-#  Serial IO/LPSS), for use by rEFInd. Supported devices (see the profile
-#  table in TouchI2cDxe.c): ROG Xbox Ally X (Novatek NVTK0603), Steam Deck
-#  OLED (FocalTech FTS3528), Steam Deck LCD (FocalTech FTS3528; distinguished
-#  from the OLED via the SMBIOS product name, since only the panel reset GPIO
-#  differs), ASUS Zenbook Pro 14 Duo UX8402VV (ELAN9008 on Intel Serial IO).
+#  Serial IO/LPSS, X64) and MediaTek i2c-mt65xx controllers (NVIDIA N1X
+#  NVDA0200, AARCH64), for use by rEFInd. Supported devices (see the profile
+#  table in TouchI2cDxe.c): ROG Xbox Ally X (Novatek NVTK0603), GPD WIN 5,
+#  Steam Deck OLED (FocalTech FTS3528), Steam Deck LCD (FocalTech FTS3528;
+#  distinguished from the OLED via the SMBIOS product name, since only the
+#  panel reset GPIO differs), ASUS Zenbook Pro 14 Duo UX8402VV (ELAN9008 on
+#  Intel Serial IO), ASUS ProArt P16 H7607BA (Ilitek on MediaTek I2C2).
 #
 #  Requires a matching SMBIOS product/baseboard profile, then uses that
 #  device's DSDT-confirmed controller and tries known panel addresses and HID
@@ -32,10 +34,14 @@
   DwI2c.c
   DwI2c.h
   FchAoac.h
+  I2cBus.c
+  I2cBus.h
   I2cHid.c
   I2cHid.h
   IntelLpss.c
   IntelLpss.h
+  MtkI2c.c
+  MtkI2c.h
   HidParse.c
   HidParse.h
 
@@ -53,6 +59,9 @@
   IoLib
   DebugLib
   PrintLib
+  DevicePathLib
+  DxeServicesTableLib
+  CacheMaintenanceLib
 
 [Guids]
   gEfiSmbiosTableGuid                        ## CONSUMES ## SystemTable
@@ -64,6 +73,10 @@
   gEfiLoadedImageProtocolGuid                ## CONSUMES
   gEfiSimpleFileSystemProtocolGuid           ## CONSUMES
   gEfiPciIoProtocolGuid                      ## CONSUMES
+  gEfiDevicePathProtocolGuid                 ## CONSUMES
+  gEfiI2cMasterProtocolGuid                  ## SOMETIMES_CONSUMES
+  gEfiI2cHostProtocolGuid                    ## SOMETIMES_CONSUMES
+  gEfiI2cIoProtocolGuid                      ## SOMETIMES_CONSUMES
 
 [Depex]
   TRUE
